@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: testcase-builder
+    runtime: node
+    plan: starter
+    buildCommand: "true"
+    startCommand: "node server.js"
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: testcase-builder-data
+      mountPath: /var/data
+      sizeGB: 1
