@@ -12,7 +12,7 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 const DEFAULT_ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const HAS_EXPLICIT_ADMIN_PASSWORD = Object.prototype.hasOwnProperty.call(process.env, "ADMIN_PASSWORD");
-const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_URL = normalizeSupabaseUrl(process.env.SUPABASE_URL);
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_STATE_TABLE = process.env.SUPABASE_STATE_TABLE || "testcase_builder_state";
 const SUPABASE_STATE_ID = process.env.SUPABASE_STATE_ID || "production";
@@ -45,6 +45,13 @@ function nowText() {
 
 function normalizeUsername(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normalizeSupabaseUrl(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/rest\/v1$/i, "");
 }
 
 function publicUser(user) {
