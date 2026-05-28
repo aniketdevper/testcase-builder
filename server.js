@@ -12,6 +12,10 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 const DEFAULT_ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const HAS_EXPLICIT_ADMIN_PASSWORD = Object.prototype.hasOwnProperty.call(process.env, "ADMIN_PASSWORD");
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_STATE_TABLE = process.env.SUPABASE_STATE_TABLE || "testcase_builder_state";
+const SUPABASE_STATE_ID = process.env.SUPABASE_STATE_ID || "production";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -26,6 +30,10 @@ const MIME_TYPES = {
 };
 
 let writeQueue = Promise.resolve();
+
+function hasSupabaseStorage() {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
 
 function makeId() {
   return crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
@@ -67,29 +75,85 @@ function verifyPassword(password, storedHash) {
   return crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(storedHash));
 }
 
-async function readDb() {
+function normalizeDb(db) {
+  return {
+    users: Array.isArray(db?.users) ? db.users : [],
+    files: Array.isArray(db?.files) ? db.files : [],
+    sessions: Array.isArray(db?.sessions) ? db.sessions : [],
+  };
+}
+
+function safeDbPayload(db) {
+  return normalizeDb(db);
+}
+
+async function supabaseRequest(pathname, options = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${pathname}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Supabase request failed (${response.status}): ${text || response.statusText}`);
+  }
+
+  return response;
+}
+
+async function readDbFromSupabase() {
+  const response = await supabaseRequest(
+    `${SUPABASE_STATE_TABLE}?id=eq.${encodeURIComponent(SUPABASE_STATE_ID)}&select=data`,
+    { method: "GET" },
+  );
+  const rows = await response.json();
+  return normalizeDb(rows?.[0]?.data);
+}
+
+async function writeDbToSupabase(db) {
+  const payload = {
+    id: SUPABASE_STATE_ID,
+    data: safeDbPayload(db),
+    updated_at: new Date().toISOString(),
+  };
+  await supabaseRequest(`${SUPABASE_STATE_TABLE}?on_conflict=id`, {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify(payload),
+  });
+}
+
+async function readDbFromFile() {
   try {
     const raw = await fs.readFile(DB_PATH, "utf8");
-    const db = JSON.parse(raw);
-    return {
-      users: Array.isArray(db.users) ? db.users : [],
-      files: Array.isArray(db.files) ? db.files : [],
-      sessions: Array.isArray(db.sessions) ? db.sessions : [],
-    };
+    return normalizeDb(JSON.parse(raw));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     return { users: [], files: [], sessions: [] };
   }
 }
 
-async function writeDb(db) {
+async function writeDbToFile(db) {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const safeDb = {
-    users: db.users || [],
-    files: db.files || [],
-    sessions: db.sessions || [],
-  };
+  const safeDb = safeDbPayload(db);
   writeQueue = writeQueue.then(() => fs.writeFile(DB_PATH, `${JSON.stringify(safeDb, null, 2)}\n`));
+  return writeQueue;
+}
+
+async function readDb() {
+  return hasSupabaseStorage() ? readDbFromSupabase() : readDbFromFile();
+}
+
+async function writeDb(db) {
+  if (!hasSupabaseStorage()) return writeDbToFile(db);
+
+  const safeDb = safeDbPayload(db);
+  writeQueue = writeQueue.then(() => writeDbToSupabase(safeDb));
   return writeQueue;
 }
 
@@ -200,7 +264,7 @@ async function handleApi(request, response, url) {
   const method = request.method || "GET";
 
   if (method === "GET" && url.pathname === "/api/health") {
-    sendJson(response, 200, { ok: true });
+    sendJson(response, 200, { ok: true, storage: hasSupabaseStorage() ? "supabase" : "file" });
     return;
   }
 
@@ -429,6 +493,7 @@ ensureDefaultAdmin()
   .then(() => {
     http.createServer(handleRequest).listen(PORT, HOST, () => {
       console.log(`Testcase Builder server running at http://${HOST}:${PORT}`);
+      console.log(`Storage: ${hasSupabaseStorage() ? "Supabase" : DB_PATH}`);
       if (HAS_EXPLICIT_ADMIN_PASSWORD) {
         console.log(`Admin username: ${DEFAULT_ADMIN_USERNAME}`);
         console.log("Admin password loaded from ADMIN_PASSWORD.");
