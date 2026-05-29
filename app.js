@@ -205,7 +205,14 @@ function generateExpectedResult(stepText) {
   if (lower.includes("assigned to") || lower.includes("assignment")) return "The task assignment should be displayed successfully.";
   if (lower.includes("field displays") || lower.includes("field shows")) return "The field should display the expected value.";
   if (lower.includes("informational message")) return "The informational message should be displayed successfully.";
-  if (lower.includes("supplier name is") || lower.includes("supplier details")) return "The supplier details should be displayed correctly.";
+  if (
+    lower.includes("supplier name is") ||
+    lower.includes("supplier details") ||
+    lower.includes("selected supplier") ||
+    (lower.includes("supplier") && lower.includes("displayed"))
+  ) {
+    return "The supplier details should be displayed correctly.";
+  }
   if (lower.includes("url") || lower.includes("portal")) return "The application page should load successfully.";
   if (lower.includes("login") || lower.includes("log in")) return "The user should be logged into the application successfully.";
   if (lower.includes("logout")) return "The user should be logged out successfully.";
@@ -405,6 +412,17 @@ function localEnhanceStep(text, question = "") {
   if (lower.startsWith("supplier detail ")) {
     const detail = getQuotedValue(raw) || getStepArgument(raw, /^supplier detail\s*/i);
     return detail ? `Verify that the selected supplier details show ${detail}.` : "Verify that the selected supplier details are displayed.";
+  }
+
+  if (lower.startsWith("supplier contact ")) {
+    const contact = getQuotedValue(raw) || getStepArgument(raw, /^supplier contact\s*/i);
+    return contact
+      ? `Verify that contact "${contact}" is displayed for the selected supplier.`
+      : "Verify that the selected supplier contact is displayed.";
+  }
+
+  if (lower.startsWith("supplier enabled")) {
+    return "Verify that the selected supplier is enabled for purchasing.";
   }
 
   if (lower.startsWith("supplier ")) {
@@ -856,11 +874,106 @@ function isSupplierCardLabel(line) {
   return /\bselected supplier\b/i.test(String(line || ""));
 }
 
+function cleanSupplierCardName(line) {
+  const clean = cleanOcrDisplayValue(
+    String(line || "")
+      .replace(OCR_SELECTED_MARKER_REPLACE_PATTERN, " ")
+      .replace(/[<>◆✦✨*]+/g, " "),
+  )
+    .replace(/\bNon\s*[-–—]?\s*Pif\b.*$/i, "")
+    .replace(/\bPif\b.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!clean) return "";
+  if (/^(selected supplier|contact|enabled for:?|payment terms|add another supplier|back|continue)$/i.test(clean)) return "";
+  if (parseSupplierDetailLine(clean) || /@/.test(clean) || /payment terms/i.test(clean)) return "";
+  return clean;
+}
+
 function parseSupplierDetailLine(line) {
   const clean = cleanOcrDisplayValue(line).replace(/[()]+$/g, "").trim();
   const match = clean.match(/^(.+?)\s*[|]\s*ID\s*:?\s*([A-Za-z0-9-]+)/i) || clean.match(/^(.+?)\s+ID\s*:\s*([A-Za-z0-9-]+)/i);
   if (!match) return null;
   return { country: cleanOcrDisplayValue(match[1]), id: cleanOcrDisplayValue(match[2]) };
+}
+
+function parseSupplierContactLine(line) {
+  const clean = cleanOcrDisplayValue(line);
+  if (!/\bcontact\b/i.test(clean)) return null;
+  const email = clean.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/i)?.[0] || "";
+  return email ? { email } : null;
+}
+
+function parseSupplierPaymentTermsLine(line) {
+  const clean = cleanOcrDisplayValue(line);
+  if (!/payment terms/i.test(clean)) return null;
+  const value = clean.match(/payment terms\s*:?\s*([^|]+)/i)?.[1]?.trim() || "";
+  return {
+    enabled: /enabled for purchasing/i.test(clean),
+    paymentTerms: value.replace(/\s+/g, " ").trim(),
+  };
+}
+
+function parseSelectedSupplierCard(lines, startIndex) {
+  const items = [];
+  let endIndex = startIndex - 1;
+  let hasSupplierName = false;
+  let hasSupplierDetail = false;
+  let hasContact = false;
+  let hasEnabled = false;
+  let hasPaymentTerms = false;
+
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const cleanLine = stripWrappingQuotes(normalizeOcrLine(lines[index]).replace(/[:*]+$/g, "").trim());
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (/^(back|continue)$/i.test(cleanLine)) break;
+    if (/^\+?\s*add another supplier$/i.test(cleanLine)) break;
+
+    endIndex = index;
+
+    const supplierDetail = parseSupplierDetailLine(cleanLine);
+    if (supplierDetail && !hasSupplierDetail) {
+      items.push({ step: `supplier detail "${supplierDetail.country} and ID ${supplierDetail.id}"`, question: "" });
+      hasSupplierDetail = true;
+      continue;
+    }
+
+    const supplierContact = parseSupplierContactLine(cleanLine);
+    if (supplierContact && !hasContact) {
+      items.push({ step: `supplier contact "${supplierContact.email}"`, question: "" });
+      hasContact = true;
+      continue;
+    }
+
+    const supplierPaymentTerms = parseSupplierPaymentTermsLine(cleanLine);
+    if (supplierPaymentTerms) {
+      if (supplierPaymentTerms.enabled && !hasEnabled) {
+        items.push({ step: "supplier enabled purchasing", question: "" });
+        hasEnabled = true;
+      }
+      if (supplierPaymentTerms.paymentTerms && !hasPaymentTerms) {
+        items.push({ step: `dropdown "${supplierPaymentTerms.paymentTerms}"`, question: "Payment terms" });
+        hasPaymentTerms = true;
+      }
+      continue;
+    }
+
+    if (/^(?:\d+[.,]?\s*)?select contact$/i.test(cleanLine)) {
+      items.push({ step: 'button "Select contact"', question: "" });
+      continue;
+    }
+
+    if (!hasSupplierName) {
+      const supplierName = cleanSupplierCardName(cleanLine);
+      if (supplierName) {
+        items.push({ step: `supplier "${supplierName}"`, question: "Selected supplier" });
+        hasSupplierName = true;
+      }
+    }
+  }
+
+  return { items, endIndex };
 }
 
 function isBlankEditableStep(step) {
@@ -1250,6 +1363,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   let pendingOptions = false;
   let visualRadioIndex = 0;
   let hasGeneratedFirstScreenStep = false;
+  let hasGeneratedSupplierCard = false;
   let skipUntilLineIndex = -1;
 
   const peekVisualSelectionGroup = () => {
@@ -1299,6 +1413,21 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     if (isLikelyOcrNoiseLine(cleanLine)) return;
 
     if (!pendingLabel && isEmailLine(cleanLine)) return;
+
+    if (/^\+?\s*add another supplier$/i.test(cleanLine)) return;
+
+    if (isSupplierCardLabel(cleanLine)) {
+      const supplierCard = parseSelectedSupplierCard(rawLines, lineIndex + 1);
+      if (supplierCard.items.length) {
+        generated.push(...supplierCard.items);
+        hasGeneratedSupplierCard = true;
+        pendingLabel = "";
+        pendingOptions = false;
+        skipUntilLineIndex = supplierCard.endIndex;
+        return;
+      }
+      if (hasGeneratedSupplierCard) return;
+    }
 
     if (pendingLabel && isSupplierCardLabel(pendingLabel)) {
       const supplierName = cleanOcrDisplayValue(cleanLine);
@@ -4136,6 +4265,32 @@ function runSelfTests() {
       enhancedSelectedSupplierSteps.includes('Click the "Select contact" button.') &&
       enhancedSelectedSupplierSteps.includes('Click the "Continue" button.') &&
       !enhancedSelectedSupplierSteps.some((step) => /_{3,}|Enabled for|United States \| ID|form or information|Select \"Enabled for/i.test(step)),
+  );
+
+  const selectedSupplierDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Selected supplier",
+      "CISCO SYSTEMS CANADA CO ◆ Non-Pif",
+      "Canada | ID: 2000008086",
+      "Contact: mig.temp@kyndryl.com + Primary = mig.temp@kyndryl.com",
+      "Enabled for purchasing | Payment terms: Net 30 days (B022) v",
+      "+ Add another supplier",
+      "Back",
+      "Continue",
+    ]),
+  );
+  const enhancedSelectedSupplierDetailsSteps = selectedSupplierDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, selectedSupplierDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "selected supplier detailed card keeps supplier metadata together",
+    enhancedSelectedSupplierDetailsSteps.includes('Verify that "CISCO SYSTEMS CANADA CO" is displayed in the "Selected supplier" section.') &&
+      enhancedSelectedSupplierDetailsSteps.includes("Verify that the selected supplier details show Canada and ID 2000008086.") &&
+      enhancedSelectedSupplierDetailsSteps.includes('Verify that contact "mig.temp@kyndryl.com" is displayed for the selected supplier.') &&
+      enhancedSelectedSupplierDetailsSteps.includes("Verify that the selected supplier is enabled for purchasing.") &&
+      enhancedSelectedSupplierDetailsSteps.includes('Select "Net 30 days (B022)" from the "Payment terms" dropdown field.') &&
+      enhancedSelectedSupplierDetailsSteps.includes('Click the "Continue" button.') &&
+      !enhancedSelectedSupplierDetailsSteps.some((step) => /Non-Pif|Add another supplier|@ Enabled|\"Selected supplier\" form|\"\\+ Add another supplier\"/i.test(step)),
   );
 
   const noisyOcrDraft = generateStepsFromScreenshotText(
