@@ -468,13 +468,25 @@ async function serveStatic(request, response, url) {
 
   try {
     const content = await fs.readFile(absolutePath);
-    const type = MIME_TYPES[path.extname(absolutePath).toLowerCase()] || "application/octet-stream";
-    response.writeHead(200, { "Content-Type": type });
+    const extension = path.extname(absolutePath).toLowerCase();
+    const type = MIME_TYPES[extension] || "application/octet-stream";
+    const headers = { "Content-Type": type };
+    if ([".html", ".js", ".css"].includes(extension)) {
+      headers["Cache-Control"] = "no-store, no-cache, must-revalidate, proxy-revalidate";
+      headers.Pragma = "no-cache";
+      headers.Expires = "0";
+    }
+    response.writeHead(200, headers);
     response.end(content);
   } catch (error) {
     if (error.code === "ENOENT") {
       const index = await fs.readFile(path.join(PUBLIC_DIR, "index.html"));
-      response.writeHead(200, { "Content-Type": MIME_TYPES[".html"] });
+      response.writeHead(200, {
+        "Content-Type": MIME_TYPES[".html"],
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      });
       response.end(index);
       return;
     }

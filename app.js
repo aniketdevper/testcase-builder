@@ -6,6 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
+const APP_VERSION = "20260529-request-details-resale-parser";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -2446,7 +2447,7 @@ function renderHeader() {
         <div class="header-grid">
           <div>
             <h1>Testcase Builder</h1>
-            <p class="subtle">Build large testcases using selected columns, grouped steps, and local step enhancement.</p>
+            <p class="subtle">Build large testcases using selected columns, grouped steps, and local step enhancement. Build: ${APP_VERSION}</p>
           </div>
           <div class="toolbar">
             <button type="button" class="button secondary ${state.currentPage === "builder" ? "active" : ""}" data-action="show-builder">Builder</button>
