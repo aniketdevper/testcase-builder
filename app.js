@@ -770,6 +770,38 @@ function isLikelyOcrNoiseLine(line) {
   return /^[A-Z|]{1,3}$/i.test(clean);
 }
 
+function isBrowserChromeOcrLine(line) {
+  const text = normalizeOcrLine(line);
+  const lower = text.toLowerCase();
+  if (!text) return true;
+  if (/https?:\/\//i.test(text)) return true;
+  if (/^cc?\s*\d*\s*https/i.test(lower)) return true;
+  if (/\b(testcase builder|chatgpt|github dashboard|logout|oro sysadmin|procure@kyndryl|ask gemini)\b/i.test(text) && /\bxx?\b|@|®|©/i.test(text)) return true;
+  if (/\b(botgauge|google sheets|vacation tracker|request form|sysadmin prod|sysadmin eu prod|sysadmin dev|gemini|chatgpt)\b/i.test(text)) return true;
+  if (/^home\s+tasks\s+requests\s+suppliers\s+more\b/i.test(text)) return true;
+  if (/^(kyndryl|opella|sysadmin|gemini|chatgpt)\b/i.test(text) && text.split(/\s+/).length > 3) return true;
+  return false;
+}
+
+const DASHBOARD_TILE_LABELS = [
+  { pattern: /\bprocurement intake process\b/i, label: "Procurement Intake" },
+  { pattern: /\bprocurement intake\b/i, label: "Procurement Intake" },
+  { pattern: /\bcontingent worker request\b/i, label: "Contingent Worker Request" },
+  { pattern: /\bsap ariba catalog redirects?\b/i, label: "SAP Ariba Catalog Redirects" },
+  { pattern: /\bsourcing execution\b/i, label: "Sourcing Execution" },
+];
+
+function getDashboardTileLabel(lines) {
+  const combined = lines.join(" ");
+  const hasDashboardSignals =
+    /\bstart new\b/i.test(combined) &&
+    (/\bmy requests\b/i.test(combined) || /\bask procure\b/i.test(combined) || /\bsee all\b/i.test(combined) || /\bkyndryl procure\b/i.test(combined));
+  if (!hasDashboardSignals) return "";
+
+  const match = DASHBOARD_TILE_LABELS.find((tile) => tile.pattern.test(combined));
+  return match?.label || "";
+}
+
 function isLikelyQuestionLabel(line) {
   return /^(who|what|when|where|which|why|how|will|does|do|is|are|can|should|would|has|have)\b/i.test(String(line || "").trim());
 }
@@ -1039,7 +1071,16 @@ function shouldMergeWrappedLabel(previousLine, currentLine, nextLine) {
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   const rawLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
+    .filter((line) => !isBrowserChromeOcrLine(line))
     .filter((line, index, lines) => line && (index === 0 || line !== lines[index - 1]));
+  const dashboardTileLabel = getDashboardTileLabel(rawLines);
+  if (dashboardTileLabel) {
+    return {
+      steps: [`tile ${dashboardTileLabel}`],
+      questions: [""],
+    };
+  }
+
   const generated = [];
   let pendingLabel = "";
   let pendingOptions = false;
@@ -3580,6 +3621,34 @@ function runSelfTests() {
       screenshotDraft.steps.includes('type "TechTest"') &&
       screenshotDraft.steps.includes("button Continue") &&
       screenshotDraft.questions.includes("Which Country you belong to"),
+  );
+
+  const kyndrylDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "@® @ Testcase Builder Xx ® ChatGPT Xx © Logout Xx © GitHub Dashboard Xx @® Oro SysAdmin Xx @® Procure@Kyndryl Xx ar ¢ Ask Gemini",
+      "Cc 25 https://app.eu.orolabs.ai/supplier-dashboard#tid_kyndryl_test_eu ww 1 J (3 Sg, = Work H",
+      "BotGauge Google Sheets Request Form Vacation Tracker",
+      "kyndryl Procure",
+      "Home Tasks Requests Suppliers More Vv Ww 9 ® 4a us",
+      "Ask Procure AI",
+      "Front door for all your procurement needs",
+      "Please describe your business needs...",
+      "Upload quote or proposal if available.",
+      "Start New See All >",
+      "Procurement Intake Process",
+      "Procurement intake for all types of requests",
+      "Start New",
+      "Contingent Worker Request",
+      "SAP Ariba Catalog Redirects",
+      "Sourcing Execution",
+      "My Requests",
+    ]),
+  );
+  assertCheck(
+    "dashboard screenshot ignores browser chrome and creates tile step",
+    kyndrylDashboardDraft.steps.length === 1 &&
+      kyndrylDashboardDraft.steps[0] === "tile Procurement Intake" &&
+      localEnhanceStep(kyndrylDashboardDraft.steps[0]) === 'Click on the "Procurement Intake" tile from the dashboard.',
   );
 
   const visualRadioDraft = generateStepsFromScreenshotText(
