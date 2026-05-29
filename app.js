@@ -1125,6 +1125,44 @@ function shouldMergeWrappedLabel(previousLine, currentLine, nextLine) {
   return previous && current && nextHasOption && previousLooksIncomplete && !currentStartsNewLabel;
 }
 
+function isLongTextFieldLabel(label) {
+  return /(describe|description|business need|need in detail|comment|notes|reason|justification|specification|details?|purpose)/i.test(
+    String(label || ""),
+  );
+}
+
+function isFieldValueBoundaryLine(line, hasCollectedValue = false) {
+  const cleanLine = stripWrappingQuotes(normalizeOcrLine(line).replace(/[:*]+$/g, "").trim());
+  if (!cleanLine || isLikelyOcrNoiseLine(cleanLine) || isButtonLikeText(cleanLine)) return true;
+  if (hasChoiceSelectedOcrMarker(cleanLine) || hasUnselectedOcrMarker(cleanLine) || isOcrOptionOnlyLine(cleanLine)) return true;
+
+  const cleanLabel = cleanOcrLabel(cleanLine);
+  if (isLikelyQuestionLabel(cleanLabel)) return true;
+  if (hasCollectedValue && isLikelyFieldLabel(cleanLabel) && getScreenshotFieldType(cleanLabel) !== "question") return true;
+  return false;
+}
+
+function collectLongTextFieldValue(lines, startIndex) {
+  const valueLines = [];
+  let endIndex = startIndex - 1;
+
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (isFieldValueBoundaryLine(line, valueLines.length > 0)) break;
+
+    const cleanValue = cleanOcrDisplayValue(stripWrappingQuotes(normalizeOcrLine(line).replace(/[:*]+$/g, "").trim()));
+    if (!cleanValue) break;
+
+    valueLines.push(cleanValue);
+    endIndex = index;
+  }
+
+  return {
+    value: valueLines.join(" ").replace(/\s+/g, " ").trim(),
+    endIndex,
+  };
+}
+
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   const rawLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
@@ -1289,6 +1327,23 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       pendingLabel = "";
       pendingOptions = false;
       return;
+    }
+
+    if (
+      pendingLabel &&
+      !pendingOptions &&
+      getScreenshotFieldType(pendingLabel) === "field" &&
+      isLongTextFieldLabel(pendingLabel) &&
+      !currentLineIsLabel
+    ) {
+      const textFieldValue = collectLongTextFieldValue(rawLines, lineIndex);
+      if (textFieldValue.value) {
+        generated.push(createScreenshotStepForValue(pendingLabel, textFieldValue.value));
+        pendingLabel = "";
+        pendingOptions = false;
+        skipUntilLineIndex = textFieldValue.endIndex;
+        return;
+      }
     }
 
     if (pendingLabel && selectedOption) {
@@ -3772,7 +3827,9 @@ function runSelfTests() {
       "© Full Buying process (Purchase Transaction)",
       "Customer Bid Assistance",
       "Describe your need in detail ®",
-      "The procurement of Cisco hardware under the SECNET program for the Canada region is required to support Air Canada's ongoing network modernization, security enhancement, and multiregion operational readiness initiatives.",
+      "The procurement of Cisco hardware under the SECNET program for the Canada region is",
+      "required to support Air Canada's ongoing network modernization, security enhancement,",
+      "and multiregion operational readiness initiatives.",
     ]),
   );
   const enhancedRequestPurposeSteps = requestPurposeDraft.steps.map((step, index) =>
