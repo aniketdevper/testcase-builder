@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260529-request-details-resale-parser";
+const APP_VERSION = "20260529-request-details-preview-repair";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -634,9 +634,28 @@ function localEnhanceStep(text, question = "") {
 }
 
 function enhanceMultilineSteps(stepText, questionText) {
-  const stepLines = splitLines(stepText);
-  const questionLines = splitLines(questionText);
-  return joinLines(stepLines.map((step, index) => localEnhanceStep(step, questionLines[index] || questionLines[0] || "")));
+  const { steps, questions } = normalizeDraftStepPairs(splitLines(stepText), splitLines(questionText));
+  return joinLines(steps.map((step, index) => localEnhanceStep(step, questions[index] || questions[0] || "")));
+}
+
+function isVisibleFieldDraftStep(step) {
+  return /^(field|dropdown|date|assignee|supplier|document)\b.*\b(verify|visible|screen|available|upload)$/i.test(String(step || "").trim());
+}
+
+function normalizeDraftStepPairs(stepLines, questionLines) {
+  const steps = [...(stepLines || [])];
+  const questions = [...(questionLines || [])];
+
+  for (let index = 0; index < steps.length - 1; index += 1) {
+    const mergedNextQuestion = splitValueAndTrailingFieldLabel(questions[index + 1]);
+    if (!mergedNextQuestion || !isVisibleFieldDraftStep(steps[index])) continue;
+    if (getScreenshotFieldType(questions[index]) === "question") continue;
+
+    steps[index] = createScreenshotStepForValue(questions[index], mergedNextQuestion.value).step;
+    questions[index + 1] = mergedNextQuestion.label;
+  }
+
+  return { steps, questions };
 }
 
 function isButtonLikeText(line) {
@@ -1865,8 +1884,9 @@ function buildRowsForFormat(steps, rowFormat) {
   if (rowFormat === "each-step") {
     let counter = 1;
     return steps.flatMap((step) => {
-      const safeLines = splitLines(step.details).length ? splitLines(step.details) : [""];
-      const questionLines = splitLines(step.questionLabel);
+      const rawStepLines = splitLines(step.details).length ? splitLines(step.details) : [""];
+      const rawQuestionLines = splitLines(step.questionLabel);
+      const { steps: safeLines, questions: questionLines } = normalizeDraftStepPairs(rawStepLines, rawQuestionLines);
       const actualLines = splitLines(step.actual);
 
       return safeLines.map((line, lineIndex) => {
@@ -1896,8 +1916,9 @@ function buildRowsForFormat(steps, rowFormat) {
   }
 
   return steps.map((step, index) => {
-    const safeLines = splitLines(step.details).length ? splitLines(step.details) : [""];
-    const questionLines = splitLines(step.questionLabel);
+    const rawStepLines = splitLines(step.details).length ? splitLines(step.details) : [""];
+    const rawQuestionLines = splitLines(step.questionLabel);
+    const { steps: safeLines, questions: questionLines } = normalizeDraftStepPairs(rawStepLines, rawQuestionLines);
     const enhancedLines = safeLines.map((line, lineIndex) => localEnhanceStep(line, questionLines[lineIndex] || questionLines[0] || ""));
     const stepNumbers = safeLines.map((_, subIndex) => `${index + 1}.${subIndex + 1}`);
     const expectedResult = generateGroupedExpectedResult(enhancedLines);
@@ -4346,6 +4367,23 @@ function runSelfTests() {
     enhancedRequestDetailsResaleSteps.includes('Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
       enhancedRequestDetailsResaleSteps.includes('For the question "Request type", select "Resale".') &&
       !enhancedRequestDetailsResaleSteps.some((step) => /SOC-UYGMTPR Request type|Opportunity Number.*visible/i.test(step)),
+  );
+
+  const repairedPreviewRows = buildRowsForFormat(
+    [
+      {
+        ...createStep(2),
+        details: joinLines(["select yes", "field verify visible on screen", 'select "Resale"']),
+        questionLabel: joinLines(["Is this spend covered in the Cost Case?", "Opportunity Number", "SOC-UYGMTPR Request type"]),
+      },
+    ],
+    "each-step",
+  );
+  assertCheck(
+    "preview repairs already-generated merged request type rows",
+    repairedPreviewRows[1]?.Steps === 'Enter "SOC-UYGMTPR" in the "Opportunity Number" field.' &&
+      repairedPreviewRows[2]?.Steps === 'For the question "Request type", select "Resale".' &&
+      !repairedPreviewRows.some((row) => /Opportunity Number.*visible|SOC-UYGMTPR Request type/i.test(row.Steps)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
