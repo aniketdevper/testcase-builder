@@ -702,6 +702,7 @@ function cleanOcrLabel(value) {
   return cleanOcrDisplayValue(value)
     .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
     .replace(/\s*[®©ⓘ]\s*$/g, "")
+    .replace(/\s*[~^˄˅⌃⌄]\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -726,7 +727,10 @@ function hasChoiceSelectedOcrMarker(line) {
   if (!OCR_SELECTED_MARKER_PATTERN.test(text)) return false;
   const withoutDecorativeMarker = cleanOcrLabel(text);
   const hasOnlyTrailingDecorativeMarker = withoutDecorativeMarker !== text && !OCR_SELECTED_MARKER_PATTERN.test(withoutDecorativeMarker);
-  if (hasOnlyTrailingDecorativeMarker && (isLikelyFieldLabel(withoutDecorativeMarker) || isLikelyQuestionLabel(withoutDecorativeMarker))) {
+  if (
+    hasOnlyTrailingDecorativeMarker &&
+    (isLikelyFieldLabel(withoutDecorativeMarker) || isLikelyQuestionLabel(withoutDecorativeMarker) || isChoiceFieldLabel(withoutDecorativeMarker))
+  ) {
     return false;
   }
   return true;
@@ -807,6 +811,8 @@ function isEmailLine(line) {
 
 function isLikelyOcrNoiseLine(line) {
   const original = String(line || "").trim();
+  if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i.test(original)) return false;
+  if (/(?:[$€£]\s*)?\d[\d,.\s]*\d\s*(?:usd|cad|eur|gbp|inr)?\b/i.test(original)) return false;
   if (/^(sack|back)\s*[|/]\s*eod$/i.test(cleanOcrDisplayValue(original))) return true;
   if (/^[._\-\s\][|]+$/.test(original)) return true;
   const clean = original.replace(/[^A-Za-z|]/g, "").trim();
@@ -857,7 +863,7 @@ function isLikelyFieldLabel(line) {
 }
 
 function isChoiceFieldLabel(line) {
-  return /(payment method|type of supplier|supplier type|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
+  return /(payment method|type of supplier|supplier type|type of engagement|engagement supported|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
     String(line || ""),
   );
 }
@@ -1032,7 +1038,7 @@ function getScreenshotFieldType(label) {
     return "field";
   }
   if (/(task|review|approval)/.test(lower)) return "task";
-  if (/(form|page|screen|section|summary|details)/.test(lower)) return "form";
+  if (/\b(form|page|screen|section|summary|details|requirements?)\b/.test(lower)) return "form";
   return "question";
 }
 
@@ -1235,6 +1241,7 @@ function shouldMergeWrappedLabel(previousLine, currentLine, nextLine) {
   const previous = String(previousLine || "").trim();
   const current = String(currentLine || "").trim();
   const nextHasOption = Boolean(getSelectedOcrOption(nextLine)) || isOcrOptionOnlyLine(nextLine);
+  const previousFieldType = getScreenshotFieldType(cleanOcrLabel(previous));
   const currentStartsNewLabel =
     isLikelyQuestionLabel(current) ||
     /assessment needed/i.test(current) ||
@@ -1243,13 +1250,25 @@ function shouldMergeWrappedLabel(previousLine, currentLine, nextLine) {
     !/[?.:]$/.test(previous) ||
     /\b(and|any|behalf|by|for|from|in|of|on|or|to|with)\s*$/i.test(previous);
 
-  return previous && current && nextHasOption && previousLooksIncomplete && !currentStartsNewLabel;
+  return previous && current && previousFieldType !== "form" && nextHasOption && previousLooksIncomplete && !currentStartsNewLabel;
 }
 
 function isLongTextFieldLabel(label) {
   return /(describe|description|business need|need in detail|comment|notes|reason|justification|specification|details?|purpose)/i.test(
     String(label || ""),
   );
+}
+
+function isAmountLikeFieldLabel(label) {
+  return /(amount|budget|value|cost|price|total)/i.test(String(label || ""));
+}
+
+function isAmountHelperTextLine(line) {
+  return /^(insert|enter|provide|add)\b.*\b(amount|value|cost|price|duration|engagement|product|service)\b/i.test(cleanOcrDisplayValue(line));
+}
+
+function isCurrencyAmountLine(line) {
+  return /(?:[$€£]\s*)?\d[\d,.\s]*\d\s*(?:usd|cad|eur|gbp|inr)?\b/i.test(cleanOcrDisplayValue(line));
 }
 
 function isFieldValueBoundaryLine(line, hasCollectedValue = false) {
@@ -1557,6 +1576,17 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       return;
     }
 
+    if (pendingLabel && !pendingOptions && isAmountLikeFieldLabel(pendingLabel) && isAmountHelperTextLine(cleanLine)) {
+      return;
+    }
+
+    if (pendingLabel && !pendingOptions && isAmountLikeFieldLabel(pendingLabel) && isCurrencyAmountLine(cleanLine)) {
+      generated.push(createScreenshotStepForValue(pendingLabel, cleanLine));
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
+    }
+
     if (
       pendingLabel &&
       !pendingOptions &&
@@ -1604,7 +1634,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       pendingOptions = false;
     }
 
-    const inlineFieldMatch = cleanLine.match(/^(.+?)\s*[:=-]\s*(.+)$/);
+    const inlineFieldMatch = cleanLine.match(/^(.+?)\s*(?::|=|\s[-–—]\s)\s*(.+)$/);
     if (inlineFieldMatch) {
       generated.push(createScreenshotStepForValue(inlineFieldMatch[1], inlineFieldMatch[2]));
       pendingLabel = "";
@@ -4126,6 +4156,46 @@ function runSelfTests() {
     ) &&
       enhancedRecommendedCategorySteps.includes('Click the "Continue" button.') &&
       !enhancedRecommendedCategorySteps.some((step) => /Recommended options|432225|HW & MAINTENANCE|Read more|View all options|form or information/i.test(step)),
+  );
+
+  const engagementDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Engagement Details ~",
+      "Type of engagement supported/ will be supported by the Supplier ®",
+      "© Single Customer",
+      "Multi-Customer pool",
+      "Kyndryl Internal Use",
+      "Is this request for a sales opportunity or delivery fulfillment ®",
+      "© Sales Opportunity",
+      "Delivery Fulfillment",
+      "Target Date ®",
+      "Jun 25, 2026",
+      "Add Requirements ~",
+      "Estimated project amount ®",
+      "Insert the total expected value of the product or service for the full duration of the engagement",
+      "$ 2,822,123.74 CAD v",
+    ]),
+  );
+  const enhancedEngagementDetailsSteps = engagementDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, engagementDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "engagement details screenshot handles radio groups and amount fields",
+    enhancedEngagementDetailsSteps.includes('Verify that "Engagement Details" form is visible on screen.') &&
+      enhancedEngagementDetailsSteps.includes(
+        'For the question "Type of engagement supported/ will be supported by the Supplier", select "Single Customer".',
+      ) &&
+      enhancedEngagementDetailsSteps.includes(
+        'For the question "Is this request for a sales opportunity or delivery fulfillment", select "Sales Opportunity".',
+      ) &&
+      enhancedEngagementDetailsSteps.includes('Select "Jun 25, 2026" in the "Target Date" date field.') &&
+      enhancedEngagementDetailsSteps.includes('Verify that "Add Requirements" form is visible on screen.') &&
+      enhancedEngagementDetailsSteps.includes('Enter "$ 2,822,123.74 CAD" in the "Estimated project amount" field.') &&
+      !enhancedEngagementDetailsSteps.some((step) =>
+        /© Single Customer|Multi-Customer pool|Kyndryl Internal Use|Insert the total expected value|form or information|\$ 2,822,123\.74 CAD.*visible/i.test(
+          step,
+        ),
+      ),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
