@@ -826,7 +826,7 @@ function isLikelyQuestionLabel(line) {
 }
 
 function isLikelyFieldLabel(line) {
-  return /(amount|entity|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|delivery location|location|address)/i.test(
+  return /(amount|entity|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|delivery location|location|address|purchase org|purchase organization|region)/i.test(
     String(line || ""),
   );
 }
@@ -893,12 +893,13 @@ function isContinueOnlyScreenshotDraft(step) {
 
 function getScreenshotFieldType(label) {
   const lower = String(label || "").toLowerCase();
+  if (/^region\b/.test(lower)) return "form";
   if (/assessment needed/.test(lower)) return "question";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
   if (isSupplierCardLabel(label)) return "supplier";
   if (/(upload|document|attachment|certificate|proof|w-9|w9|capa|soc|iso|quotation)/.test(lower)) return "document";
   if (isChoiceFieldLabel(label)) return "question";
-  if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|entity|cost center|company entity)/.test(lower)) {
+  if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|entity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
     return "dropdown";
   }
   if (/(assignee|owner|requestor|requester|user|approver|buyer|manager)/.test(lower)) return "assignee";
@@ -1163,6 +1164,22 @@ function collectLongTextFieldValue(lines, startIndex) {
   };
 }
 
+function parseEmbeddedDropdownFieldValue(line) {
+  const cleanLine = cleanOcrLabel(line);
+  const performedForMatch = cleanLine.match(/^(.+\bperformed\s+for)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})$/i);
+  if (performedForMatch && getScreenshotFieldType(performedForMatch[1]) === "dropdown") {
+    return {
+      label: performedForMatch[1].trim(),
+      value: performedForMatch[2].trim(),
+    };
+  }
+  return null;
+}
+
+function isCodeDashValueLine(line) {
+  return /^\d{2,}\s*[-–—]\s*\S/.test(cleanOcrDisplayValue(line));
+}
+
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   const rawLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
@@ -1213,9 +1230,9 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     const lower = cleanLine.toLowerCase();
     const optionWords = getOcrOptionWords(cleanLine);
     const isOptionLine = isOcrOptionOnlyLine(cleanLine);
-    const selectedOption = getSelectedOcrOption(cleanLine);
+    const selectedOption = hasChoiceSelectedOcrMarker(cleanLine) ? getSelectedOcrOption(cleanLine) : "";
     const nextLine = rawLines[lineIndex + 1] || "";
-    const nextLineHasSelectedOption = Boolean(getSelectedOcrOption(nextLine));
+    const nextLineHasSelectedOption = hasChoiceSelectedOcrMarker(nextLine) && Boolean(getSelectedOcrOption(nextLine));
     const nextLineIsOptionOnly = isOcrOptionOnlyLine(nextLine);
     const nextLineIsStandaloneValue = isLikelyStandaloneValue(cleanOcrDisplayValue(nextLine));
     const currentLineIsLabel =
@@ -1258,6 +1275,15 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
 
     if (/^enabled for:?$/i.test(cleanLine)) return;
 
+    const embeddedDropdownFieldValue = parseEmbeddedDropdownFieldValue(cleanLine);
+    if (embeddedDropdownFieldValue) {
+      if (pendingLabel && !pendingOptions) generated.push(createPendingLabelStep(pendingLabel));
+      generated.push(createScreenshotStepForValue(embeddedDropdownFieldValue.label, embeddedDropdownFieldValue.value));
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
+    }
+
     if (pendingLabel && (getScreenshotFieldType(pendingLabel) === "question" || isChoiceFieldLabel(pendingLabel))) {
       const visualGroup = peekVisualSelectionGroup();
       const shouldUseMultiSelectFallback = isMultiSelectQuestionLabel(pendingLabel);
@@ -1296,6 +1322,13 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
         skipUntilLineIndex = endIndex;
         return;
       }
+    }
+
+    if (pendingLabel && !pendingOptions && isCodeDashValueLine(cleanLine)) {
+      generated.push(createScreenshotStepForValue(pendingLabel, cleanLine));
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
     }
 
     if (pendingLabel && getScreenshotFieldType(pendingLabel) === "document" && /click to upload|drag and drop/i.test(cleanLine)) {
@@ -3850,6 +3883,30 @@ function runSelfTests() {
         'Enter "The procurement of Cisco hardware under the SECNET program for the Canada region is required to support Air Canada\'s ongoing network modernization, security enhancement, and multiregion operational readiness initiatives." in the "Describe your need in detail" field.',
       ) &&
       !enhancedRequestPurposeSteps.some((step) => /Indicative Budgetary Quote.*Describe your need|select .*Indicative Budgetary Quote|®/i.test(step)),
+  );
+
+  const regionDropdownDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Region ®",
+      "Select the primary country where goods will be delivered / services will be performed for Canada",
+      "Kyndryl Entity ®",
+      "1110 - Kyndryl Canada Limited",
+      "Purchase Org",
+      "1100 - Kyndryl Canada",
+    ]),
+  );
+  const enhancedRegionDropdownSteps = regionDropdownDraft.steps.map((step, index) =>
+    localEnhanceStep(step, regionDropdownDraft.questions[index]),
+  );
+  assertCheck(
+    "region dropdown screenshot keeps values with their fields",
+    enhancedRegionDropdownSteps.includes('Verify that "Region" form is visible on screen.') &&
+      enhancedRegionDropdownSteps.includes(
+        'Select "Canada" from the "Select the primary country where goods will be delivered / services will be performed for" dropdown field.',
+      ) &&
+      enhancedRegionDropdownSteps.includes('Select "1110 - Kyndryl Canada Limited" from the "Kyndryl Entity" dropdown field.') &&
+      enhancedRegionDropdownSteps.includes('Select "1100 - Kyndryl Canada" from the "Purchase Org" dropdown field.') &&
+      !enhancedRegionDropdownSteps.some((step) => /Region ®|Kyndryl Entity.*primary country|\"1110\" field|\"1100\" field/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
