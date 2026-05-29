@@ -1300,6 +1300,22 @@ function splitValueAndTrailingFieldLabel(line) {
   return null;
 }
 
+function canReplacePendingGeneratedStep(item) {
+  if (!item?.question) return false;
+  const fieldType = getScreenshotFieldType(item.question);
+  return (
+    fieldType !== "question" &&
+    [
+      "field verify visible on screen",
+      "dropdown",
+      "date",
+      "assignee",
+      "supplier",
+      "document",
+    ].includes(item.step)
+  );
+}
+
 function isUserPickerPlaceholderLine(line) {
   return /\bselect\s+user\b/i.test(cleanOcrDisplayValue(line));
 }
@@ -1613,6 +1629,17 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       const valueAndNextLabel = splitValueAndTrailingFieldLabel(cleanLine);
       if (valueAndNextLabel) {
         generated.push(createScreenshotStepForValue(pendingLabel, valueAndNextLabel.value));
+        pendingLabel = valueAndNextLabel.label;
+        pendingOptions = false;
+        return;
+      }
+    }
+
+    if (!pendingLabel) {
+      const valueAndNextLabel = splitValueAndTrailingFieldLabel(cleanLine);
+      const previousGenerated = generated[generated.length - 1];
+      if (valueAndNextLabel && canReplacePendingGeneratedStep(previousGenerated)) {
+        generated[generated.length - 1] = createScreenshotStepForValue(previousGenerated.question, valueAndNextLabel.value);
         pendingLabel = valueAndNextLabel.label;
         pendingOptions = false;
         return;
@@ -4291,6 +4318,33 @@ function runSelfTests() {
       enhancedRequestDetailsFieldsSteps.includes('Open the "Add watchers (if any)" assignee field and select the applicable user.') &&
       enhancedRequestDetailsFieldsSteps.includes('Click the "Continue" button.') &&
       !enhancedRequestDetailsFieldsSteps.some((step) => /SOC-UYGMTPR Request type|select the \"New Purchase\" document|I XS Select user|&/i.test(step)),
+  );
+
+  const requestDetailsResaleDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Is this spend covered in the Cost Case?",
+      "© Yes O No",
+      "Opportunity Number",
+      "SOC-UYGMTPR Request type",
+      "New Purchase",
+      "© Resale",
+      "Renewal",
+      "Will this transaction be a capital expenditure for Kyndryl?",
+      "© Yes O No",
+      "Have you verified that there are no reusable assets available to meet your requirements?",
+      "O Yes © No",
+      "Do you have a quotation from a supplier?",
+      "O Yes © No",
+    ]),
+  );
+  const enhancedRequestDetailsResaleSteps = requestDetailsResaleDraft.steps.map((step, index) =>
+    localEnhanceStep(step, requestDetailsResaleDraft.questions[index]),
+  );
+  assertCheck(
+    "request details screenshot keeps opportunity value separate from resale request type",
+    enhancedRequestDetailsResaleSteps.includes('Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
+      enhancedRequestDetailsResaleSteps.includes('For the question "Request type", select "Resale".') &&
+      !enhancedRequestDetailsResaleSteps.some((step) => /SOC-UYGMTPR Request type|Opportunity Number.*visible/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
