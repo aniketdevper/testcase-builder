@@ -703,6 +703,7 @@ function cleanOcrLabel(value) {
     .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
     .replace(/\s*[®©ⓘ]\s*$/g, "")
     .replace(/\s*[~^˄˅⌃⌄]\s*$/g, "")
+    .replace(/\s+[&]\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -857,13 +858,13 @@ function isLikelyQuestionLabel(line) {
 }
 
 function isLikelyFieldLabel(line) {
-  return /(amount|entity|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|delivery location|location|address|purchase org|purchase organization|region)/i.test(
+  return /(amount|entity|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
     String(line || ""),
   );
 }
 
 function isChoiceFieldLabel(line) {
-  return /(payment method|type of supplier|supplier type|type of engagement|engagement supported|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
+  return /(payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
     String(line || ""),
   );
 }
@@ -1023,15 +1024,15 @@ function getScreenshotFieldType(label) {
   if (/assessment needed/.test(lower)) return "question";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
   if (isSupplierCardLabel(label)) return "supplier";
-  if (/(upload|document|attachment|certificate|proof|w-9|w9|capa|soc|iso|quotation)/.test(lower)) return "document";
+  if (/\b(upload|document|attachment|certificate|proof|w-9|w9|capa|soc|iso|quotation)\b/.test(lower)) return "document";
   if (isChoiceFieldLabel(label)) return "question";
   if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|entity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
     return "dropdown";
   }
-  if (/(assignee|owner|requestor|requester|user|approver|buyer|manager)/.test(lower)) return "assignee";
+  if (/(assignee|owner|requestor|requester|user|approver|buyer|manager|watchers?)/.test(lower)) return "assignee";
   if (/(date|deadline|start date|end date)/.test(lower)) return "date";
   if (
-    /(name|email|number|amount|reason|comment|notes|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|specification|delivery location|location)/.test(
+    /(name|email|number|amount|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|specification|delivery location|location)/.test(
       lower,
     )
   ) {
@@ -1269,6 +1270,38 @@ function isAmountHelperTextLine(line) {
 
 function isCurrencyAmountLine(line) {
   return /(?:[$€£]\s*)?\d[\d,.\s]*\d\s*(?:usd|cad|eur|gbp|inr)?\b/i.test(cleanOcrDisplayValue(line));
+}
+
+const TRAILING_FIELD_LABEL_PATTERNS = [
+  "Request type",
+  "Target Date",
+  "Required by date",
+  "Payment method",
+  "Upload additional documents (if any)",
+  "Additional instructions for the supplier",
+  "Add watchers (if any)",
+  "Purchase Org",
+  "Kyndryl Entity",
+];
+
+function splitValueAndTrailingFieldLabel(line) {
+  const cleanLine = cleanOcrLabel(line);
+  for (const label of TRAILING_FIELD_LABEL_PATTERNS) {
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\ /g, "\\s+");
+    const match = cleanLine.match(new RegExp(`^(.+?)\\s+(${escapedLabel})$`, "i"));
+    if (match) {
+      const value = cleanOcrDisplayValue(match[1]);
+      const trailingLabel = cleanOcrLabel(match[2]);
+      if (value && trailingLabel && value.toLowerCase() !== trailingLabel.toLowerCase()) {
+        return { value, label: trailingLabel };
+      }
+    }
+  }
+  return null;
+}
+
+function isUserPickerPlaceholderLine(line) {
+  return /\bselect\s+user\b/i.test(cleanOcrDisplayValue(line));
 }
 
 function isFieldValueBoundaryLine(line, hasCollectedValue = false) {
@@ -1571,6 +1604,23 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
 
     if (pendingLabel && /(delivery location|address|location)/i.test(pendingLabel) && /(search address|add manually|search)/i.test(cleanLine)) {
       generated.push(createScreenshotStepForValue(pendingLabel, cleanLine));
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
+    }
+
+    if (pendingLabel && !pendingOptions) {
+      const valueAndNextLabel = splitValueAndTrailingFieldLabel(cleanLine);
+      if (valueAndNextLabel) {
+        generated.push(createScreenshotStepForValue(pendingLabel, valueAndNextLabel.value));
+        pendingLabel = valueAndNextLabel.label;
+        pendingOptions = false;
+        return;
+      }
+    }
+
+    if (pendingLabel && !pendingOptions && getScreenshotFieldType(pendingLabel) === "assignee" && isUserPickerPlaceholderLine(cleanLine)) {
+      generated.push(createPendingLabelStep(pendingLabel));
       pendingLabel = "";
       pendingOptions = false;
       return;
@@ -4196,6 +4246,51 @@ function runSelfTests() {
           step,
         ),
       ),
+  );
+
+  const requestDetailsFieldsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Is this spend covered in the Cost Case?",
+      "© Yes O No",
+      "Opportunity Number",
+      "SOC-UYGMTPR Request type",
+      "© New Purchase",
+      "Resale",
+      "Renewal",
+      "Will this transaction be a capital expenditure for Kyndryl? &",
+      "O Yes © No",
+      "Have you verified that there are no reusable assets available to meet your requirements?",
+      "© Yes O No",
+      "Do you have a quotation from a supplier?",
+      "O Yes © No",
+      "Upload additional documents (if any) &",
+      "Click to Upload or drag and drop",
+      "Additional instructions for the supplier",
+      "Add watchers (if any) &",
+      "I XS Select user v |",
+      "Continue",
+    ]),
+  );
+  const enhancedRequestDetailsFieldsSteps = requestDetailsFieldsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, requestDetailsFieldsDraft.questions[index]),
+  );
+  assertCheck(
+    "request details screenshot separates merged value labels and optional controls",
+    enhancedRequestDetailsFieldsSteps.includes('For the question "Is this spend covered in the Cost Case?", select "Yes".') &&
+      enhancedRequestDetailsFieldsSteps.includes('Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
+      enhancedRequestDetailsFieldsSteps.includes('For the question "Request type", select "New Purchase".') &&
+      enhancedRequestDetailsFieldsSteps.includes(
+        'For the question "Will this transaction be a capital expenditure for Kyndryl?", select "No".',
+      ) &&
+      enhancedRequestDetailsFieldsSteps.includes(
+        'For the question "Have you verified that there are no reusable assets available to meet your requirements?", select "Yes".',
+      ) &&
+      enhancedRequestDetailsFieldsSteps.includes('For the question "Do you have a quotation from a supplier?", select "No".') &&
+      enhancedRequestDetailsFieldsSteps.includes('For the "Upload additional documents (if any)", upload a valid document.') &&
+      enhancedRequestDetailsFieldsSteps.includes('Verify that the "Additional instructions for the supplier" field is visible on screen.') &&
+      enhancedRequestDetailsFieldsSteps.includes('Open the "Add watchers (if any)" assignee field and select the applicable user.') &&
+      enhancedRequestDetailsFieldsSteps.includes('Click the "Continue" button.') &&
+      !enhancedRequestDetailsFieldsSteps.some((step) => /SOC-UYGMTPR Request type|select the \"New Purchase\" document|I XS Select user|&/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
