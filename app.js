@@ -370,6 +370,13 @@ function localEnhanceStep(text, question = "") {
       : "Open the dropdown field and verify that the expected options are available.";
   }
 
+  if (lower.startsWith("category ")) {
+    const categoryName = getQuotedValue(raw) || getStepArgument(raw, /^category\s*/i);
+    return cleanQuestion
+      ? `Select the recommended category "${categoryName || "applicable category"}" for the "${cleanQuestion}" field.`
+      : `Select the category "${categoryName || "applicable category"}".`;
+  }
+
   if (lower.startsWith("url ") || lower.startsWith("open url") || lower === "open portal") {
     const targetUrl = getStepArgument(raw, /^(url|open url|open portal)\s*/i);
     return targetUrl ? `Open browser and enter URL: ${targetUrl}.` : "Open the application portal in the browser.";
@@ -1180,6 +1187,51 @@ function isCodeDashValueLine(line) {
   return /^\d{2,}\s*[-–—]\s*\S/.test(cleanOcrDisplayValue(line));
 }
 
+function isCategoryQuestionLabel(label) {
+  return /best category|category for your request|select .*category/i.test(String(label || ""));
+}
+
+function isRecommendedCategoryHeader(line) {
+  return /recommended options/i.test(cleanOcrDisplayValue(line));
+}
+
+function isCategoryRecommendationHelperLine(line) {
+  return /not the result|view all options|read more/i.test(cleanOcrDisplayValue(line));
+}
+
+function cleanRecommendedCategoryName(line) {
+  const clean = cleanOcrDisplayValue(line)
+    .replace(/[<>◆✦✨*]+/g, " ")
+    .replace(/\s+\d{4,}\s*[°ºoO]?\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean || isRecommendedCategoryHeader(clean) || isCategoryRecommendationHelperLine(clean)) return "";
+  if (/^(hw|software|services?)\s*&|maintenance|purchase of|unwanted traffic|includes\b/i.test(clean)) return "";
+  if (/^\(?hw\)?$/i.test(clean)) return "";
+  return clean;
+}
+
+function parseRecommendedCategorySelection(lines, startIndex) {
+  let categoryName = "";
+  let endIndex = startIndex - 1;
+
+  for (let index = startIndex; index < lines.length && index < startIndex + 10; index += 1) {
+    const cleanLine = stripWrappingQuotes(normalizeOcrLine(lines[index]).replace(/[:*]+$/g, "").trim());
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (isButtonLikeText(cleanLine)) break;
+
+    endIndex = index;
+    if (isRecommendedCategoryHeader(cleanLine) || isCategoryRecommendationHelperLine(cleanLine)) continue;
+
+    if (!categoryName) {
+      const candidate = cleanRecommendedCategoryName(cleanLine);
+      if (candidate) categoryName = candidate;
+    }
+  }
+
+  return { value: categoryName, endIndex };
+}
+
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   const rawLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
@@ -1274,6 +1326,20 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     }
 
     if (/^enabled for:?$/i.test(cleanLine)) return;
+
+    if (isRecommendedCategoryHeader(cleanLine) && !pendingLabel) return;
+    if (isCategoryRecommendationHelperLine(cleanLine) && !pendingLabel) return;
+
+    if (pendingLabel && isCategoryQuestionLabel(pendingLabel)) {
+      const recommendedCategory = parseRecommendedCategorySelection(rawLines, lineIndex);
+      if (recommendedCategory.value) {
+        generated.push({ step: `category "${recommendedCategory.value}"`, question: pendingLabel });
+        pendingLabel = "";
+        pendingOptions = false;
+        skipUntilLineIndex = recommendedCategory.endIndex;
+        return;
+      }
+    }
 
     const embeddedDropdownFieldValue = parseEmbeddedDropdownFieldValue(cleanLine);
     if (embeddedDropdownFieldValue) {
@@ -3907,6 +3973,30 @@ function runSelfTests() {
       enhancedRegionDropdownSteps.includes('Select "1110 - Kyndryl Canada Limited" from the "Kyndryl Entity" dropdown field.') &&
       enhancedRegionDropdownSteps.includes('Select "1100 - Kyndryl Canada" from the "Purchase Org" dropdown field.') &&
       !enhancedRegionDropdownSteps.some((step) => /Region ®|Kyndryl Entity.*primary country|\"1110\" field|\"1100\" field/i.test(step)),
+  );
+
+  const recommendedCategoryDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Please select the best category for your request",
+      "<> Recommended options",
+      "Network security equipment 432225 °",
+      "HW & MAINTENANCE - (HW)",
+      "Purchase of OEM HW that is designed to protect computer networks from",
+      "unwanted traffic. Includes Active, passive, preventive and UTM devices and t... Read more",
+      ") Not the result you are looking for? View all options",
+      "Continue",
+    ]),
+  );
+  const enhancedRecommendedCategorySteps = recommendedCategoryDraft.steps.map((step, index) =>
+    localEnhanceStep(step, recommendedCategoryDraft.questions[index]),
+  );
+  assertCheck(
+    "recommended category screenshot collapses card into one selection",
+    enhancedRecommendedCategorySteps.includes(
+      'Select the recommended category "Network security equipment" for the "Please select the best category for your request" field.',
+    ) &&
+      enhancedRecommendedCategorySteps.includes('Click the "Continue" button.') &&
+      !enhancedRecommendedCategorySteps.some((step) => /Recommended options|432225|HW & MAINTENANCE|Read more|View all options|form or information/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
