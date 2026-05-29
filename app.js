@@ -673,6 +673,14 @@ function cleanOcrDisplayValue(value) {
     .trim();
 }
 
+function cleanOcrLabel(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
+    .replace(/\s*[®©ⓘ]\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function cleanOcrOptionValue(value) {
   return stripWrappingQuotes(
     String(value || "")
@@ -686,6 +694,17 @@ function cleanOcrOptionValue(value) {
 
 function hasSelectedOcrMarker(line) {
   return OCR_SELECTED_MARKER_PATTERN.test(normalizeOcrLine(line));
+}
+
+function hasChoiceSelectedOcrMarker(line) {
+  const text = normalizeOcrLine(line);
+  if (!OCR_SELECTED_MARKER_PATTERN.test(text)) return false;
+  const withoutDecorativeMarker = cleanOcrLabel(text);
+  const hasOnlyTrailingDecorativeMarker = withoutDecorativeMarker !== text && !OCR_SELECTED_MARKER_PATTERN.test(withoutDecorativeMarker);
+  if (hasOnlyTrailingDecorativeMarker && (isLikelyFieldLabel(withoutDecorativeMarker) || isLikelyQuestionLabel(withoutDecorativeMarker))) {
+    return false;
+  }
+  return true;
 }
 
 function hasUnselectedOcrMarker(line) {
@@ -897,7 +916,7 @@ function getScreenshotFieldType(label) {
 }
 
 function createScreenshotStepForValue(label, value) {
-  const cleanLabel = normalizeOcrLine(label).replace(/[:*]+$/g, "").trim();
+  const cleanLabel = cleanOcrLabel(label).replace(/[:*]+$/g, "").trim();
   const selectedValue = getSelectedOcrOption(value);
   const cleanValue = cleanOcrDisplayValue(selectedValue || cleanOcrOptionValue(value));
   const lowerValue = cleanValue.toLowerCase();
@@ -927,16 +946,17 @@ function createScreenshotStepForValue(label, value) {
 }
 
 function createPendingLabelStep(label) {
-  const fieldType = getScreenshotFieldType(label);
-  if (fieldType === "document") return { step: "document", question: label };
-  if (fieldType === "supplier") return { step: "supplier", question: label };
-  if (fieldType === "task") return { step: "task verify visible on screen", question: label };
-  if (fieldType === "form") return { step: "form verify visible on screen", question: label };
-  if (fieldType === "dropdown") return { step: "dropdown", question: label };
-  if (fieldType === "assignee") return { step: "assignee", question: label };
-  if (fieldType === "date") return { step: "date", question: label };
-  if (fieldType === "field") return { step: "field verify visible on screen", question: label };
-  return { step: "question verify visible on screen", question: label };
+  const cleanLabel = cleanOcrLabel(label);
+  const fieldType = getScreenshotFieldType(cleanLabel);
+  if (fieldType === "document") return { step: "document", question: cleanLabel };
+  if (fieldType === "supplier") return { step: "supplier", question: cleanLabel };
+  if (fieldType === "task") return { step: "task verify visible on screen", question: cleanLabel };
+  if (fieldType === "form") return { step: "form verify visible on screen", question: cleanLabel };
+  if (fieldType === "dropdown") return { step: "dropdown", question: cleanLabel };
+  if (fieldType === "assignee") return { step: "assignee", question: cleanLabel };
+  if (fieldType === "date") return { step: "date", question: cleanLabel };
+  if (fieldType === "field") return { step: "field verify visible on screen", question: cleanLabel };
+  return { step: "question verify visible on screen", question: cleanLabel };
 }
 
 function cleanDynamicOptionLabel(line) {
@@ -967,6 +987,41 @@ function isKnownChoiceOptionValue(value) {
   return CHOICE_OPTION_PREFIXES.has(normalizeChoiceOptionKey(value));
 }
 
+function isChoiceOptionDescriptionLine(line) {
+  return /^(yes|no|high|medium|low|n\/a|na|not applicable|none of the above)\s*[:：]/i.test(cleanDynamicOptionLabel(line));
+}
+
+function isKnownChoiceOptionLine(value) {
+  return isKnownChoiceOptionValue(value) || isKnownChoiceOptionValue(String(value || "").split(/[:：]/)[0]);
+}
+
+function isBareFieldBoundaryChoiceLine(line, options = {}) {
+  if (options.allowFieldLikeBare) return false;
+
+  const cleanLine = stripWrappingQuotes(normalizeOcrLine(line).replace(/[:*]+$/g, "").trim());
+  const cleanLabel = cleanOcrLabel(cleanLine);
+  const value = cleanChoiceOptionValue(cleanLine);
+  if (!cleanLine || hasChoiceSelectedOcrMarker(cleanLine) || hasUnselectedOcrMarker(cleanLine)) return false;
+  if (isKnownChoiceOptionLine(value) || isChoiceOptionDescriptionLine(cleanLine)) return false;
+  if (isLikelyQuestionLabel(cleanLabel)) return true;
+
+  const fieldType = getScreenshotFieldType(cleanLabel);
+  return isLikelyFieldLabel(cleanLabel) || ["field", "dropdown", "document", "date", "assignee", "supplier", "form", "task"].includes(fieldType);
+}
+
+function hasNearbyChoiceMarker(lines, startIndex) {
+  let checked = 0;
+  for (let index = startIndex; index < lines.length && checked < 8; index += 1) {
+    const cleanLine = stripWrappingQuotes(normalizeOcrLine(lines[index]).replace(/[:*]+$/g, "").trim());
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (checked > 0 && isBareFieldBoundaryChoiceLine(cleanLine)) break;
+    if (isButtonLikeText(cleanLine)) break;
+    if (hasChoiceSelectedOcrMarker(cleanLine) || hasUnselectedOcrMarker(cleanLine)) return true;
+    checked += 1;
+  }
+  return false;
+}
+
 function getInlineChoiceItems(line) {
   const text = normalizeOcrLine(line);
   const optionMatches = [...text.matchAll(/\b(yes|no|high|medium|low|n\/a|na|not applicable)\b/gi)];
@@ -991,13 +1046,13 @@ function getInlineChoiceItems(line) {
 function getChoiceOptionItem(line, allowBareOption = false, options = {}) {
   const cleanLine = stripWrappingQuotes(normalizeOcrLine(line).replace(/[:*]+$/g, "").trim());
   if (!cleanLine || isLikelyOcrNoiseLine(cleanLine) || isInformationalTextLine(cleanLine)) return null;
-  if (isButtonLikeText(cleanLine) && !hasSelectedOcrMarker(cleanLine)) return null;
-  if (isLikelyQuestionLabel(cleanLine) && !hasSelectedOcrMarker(cleanLine) && !hasUnselectedOcrMarker(cleanLine)) return null;
+  if (isButtonLikeText(cleanLine) && !hasChoiceSelectedOcrMarker(cleanLine)) return null;
+  if (isLikelyQuestionLabel(cleanOcrLabel(cleanLine)) && !hasChoiceSelectedOcrMarker(cleanLine) && !hasUnselectedOcrMarker(cleanLine)) return null;
 
   const value = cleanChoiceOptionValue(cleanLine);
   if (!value) return null;
 
-  const selected = hasSelectedOcrMarker(cleanLine);
+  const selected = hasChoiceSelectedOcrMarker(cleanLine);
   const unselected = hasUnselectedOcrMarker(cleanLine);
   if (
     allowBareOption &&
@@ -1009,8 +1064,8 @@ function getChoiceOptionItem(line, allowBareOption = false, options = {}) {
     return null;
   }
 
-  const startsWithKnownPrefix = isKnownChoiceOptionValue(value) || isKnownChoiceOptionValue(value.split(/[:：]/)[0]);
-  const startsWithOptionDescription = /^(yes|no|high|medium|low|n\/a|na|not applicable|none of the above)\s*[:：]/i.test(cleanDynamicOptionLabel(cleanLine));
+  const startsWithKnownPrefix = isKnownChoiceOptionLine(value);
+  const startsWithOptionDescription = isChoiceOptionDescriptionLine(cleanLine);
   const looksLikeOption = selected || unselected || startsWithKnownPrefix || startsWithOptionDescription || allowBareOption;
 
   if (!looksLikeOption) return null;
@@ -1023,6 +1078,8 @@ function collectChoiceOptionItems(lines, startIndex, options = {}) {
 
   for (let index = startIndex; index < lines.length; index += 1) {
     const optionLine = stripWrappingQuotes(lines[index].replace(/[:*]+$/g, "").trim());
+    if (items.length && isBareFieldBoundaryChoiceLine(optionLine, options)) break;
+
     const inlineItems = getInlineChoiceItems(optionLine);
     if (inlineItems.length) {
       items.push(...inlineItems);
@@ -1166,11 +1223,15 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     if (pendingLabel && (getScreenshotFieldType(pendingLabel) === "question" || isChoiceFieldLabel(pendingLabel))) {
       const visualGroup = peekVisualSelectionGroup();
       const shouldUseMultiSelectFallback = isMultiSelectQuestionLabel(pendingLabel);
+      const hasMarkedOptionsNearby = hasNearbyChoiceMarker(rawLines, lineIndex);
       const shouldCollectBareVisualOptions =
-        (Boolean(visualGroup?.optionCount && visualGroup.optionCount >= 2) && isChoiceFieldLabel(pendingLabel)) || shouldUseMultiSelectFallback;
+        (Boolean(visualGroup?.optionCount && visualGroup.optionCount >= 2) &&
+          (isChoiceFieldLabel(pendingLabel) || getScreenshotFieldType(pendingLabel) === "question")) ||
+        hasMarkedOptionsNearby ||
+        shouldUseMultiSelectFallback;
       const { items: optionItems, endIndex } = collectChoiceOptionItems(rawLines, lineIndex, {
         allowBareFirst: shouldCollectBareVisualOptions,
-        allowFieldLikeBare: shouldCollectBareVisualOptions,
+        allowFieldLikeBare: shouldUseMultiSelectFallback,
         maxItems: shouldCollectBareVisualOptions ? visualGroup?.optionCount || 8 : 0,
       });
 
@@ -1251,7 +1312,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     }
 
     if (pendingLabel && !pendingOptions && currentLineIsLabel && shouldMergeWrappedLabel(pendingLabel, cleanLine, nextLine)) {
-      pendingLabel = `${pendingLabel} ${cleanLine}`;
+      pendingLabel = cleanOcrLabel(`${pendingLabel} ${cleanLine}`);
       return;
     }
 
@@ -1304,7 +1365,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
 
     if (currentLineIsLabel) {
       if (pendingLabel && !pendingOptions) generated.push(createPendingLabelStep(pendingLabel));
-      pendingLabel = cleanLine;
+      pendingLabel = cleanOcrLabel(cleanLine);
       pendingOptions = false;
       return;
     }
@@ -3695,6 +3756,43 @@ function runSelfTests() {
       ) &&
       enhancedProcurementIntakeSteps.includes('Click the "Continue" button.') &&
       !enhancedProcurementIntakeSteps.some((step) => /\b(LJ|Vz|customeradmin\+anitech_solutions_dev)/i.test(step)),
+  );
+
+  const requestPurposeDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Procurement Intake Process",
+      "Request Details",
+      "Requester",
+      "John Shula (aniket.dabhade@orolabs.ai)",
+      "John.Shula@kyndryl.com",
+      "Are you requesting on behalf of someone else? ®",
+      "No",
+      "What's the purpose of this request? ®",
+      "Indicative Budgetary Quote",
+      "© Full Buying process (Purchase Transaction)",
+      "Customer Bid Assistance",
+      "Describe your need in detail ®",
+      "The procurement of Cisco hardware under the SECNET program for the Canada region is required to support Air Canada's ongoing network modernization, security enhancement, and multiregion operational readiness initiatives.",
+    ]),
+  );
+  const enhancedRequestPurposeSteps = requestPurposeDraft.steps.map((step, index) =>
+    localEnhanceStep(step, requestPurposeDraft.questions[index]),
+  );
+  assertCheck(
+    "request purpose screenshot keeps radio choice separate from text area",
+    enhancedRequestPurposeSteps.includes('Verify that "Procurement Intake Process" form is visible on screen.') &&
+      enhancedRequestPurposeSteps.includes('Verify that "Request Details" form is visible on screen.') &&
+      enhancedRequestPurposeSteps.includes(
+        'Verify that the "Requester" field is auto-populated with "John Shula (aniket.dabhade@orolabs.ai)".',
+      ) &&
+      enhancedRequestPurposeSteps.includes('For the question "Are you requesting on behalf of someone else?", select "No".') &&
+      enhancedRequestPurposeSteps.includes(
+        'For the question "What\'s the purpose of this request?", select "Full Buying process (Purchase Transaction)".',
+      ) &&
+      enhancedRequestPurposeSteps.includes(
+        'Enter "The procurement of Cisco hardware under the SECNET program for the Canada region is required to support Air Canada\'s ongoing network modernization, security enhancement, and multiregion operational readiness initiatives." in the "Describe your need in detail" field.',
+      ) &&
+      !enhancedRequestPurposeSteps.some((step) => /Indicative Budgetary Quote.*Describe your need|select .*Indicative Budgetary Quote|®/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
