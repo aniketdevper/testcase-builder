@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-split-amount-currency-cleanup";
+const APP_VERSION = "20260601-known-field-merge";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -1561,6 +1561,193 @@ function parseRecommendedCategorySelection(lines, startIndex) {
   }
 
   return { value: categoryName, endIndex };
+}
+
+function findNextUsefulOcrLine(lines, startIndex, predicate, maxLookahead = 8) {
+  for (let index = startIndex; index < lines.length && index <= startIndex + maxLookahead; index += 1) {
+    const cleanLine = cleanOcrLabel(lines[index]);
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine) || isAmountHelperTextLine(cleanLine)) continue;
+    if (predicate(cleanLine, index)) return { line: cleanLine, index };
+  }
+  return null;
+}
+
+function getSelectedKnownOptionFromLines(lines, startIndex, options, maxLookahead = 8) {
+  const normalizedOptions = options.map((option) => normalizeChoiceOptionKey(option));
+  for (let index = startIndex; index < lines.length && index <= startIndex + maxLookahead; index += 1) {
+    const rawLine = lines[index];
+    const cleanLine = cleanOcrLabel(rawLine);
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (index > startIndex && (isLikelyQuestionLabel(cleanLine) || isLikelyFieldLabel(cleanLine) || isChoiceFieldLabel(cleanLine))) break;
+
+    const selected = getSelectedOcrOption(rawLine);
+    const selectedKey = normalizeChoiceOptionKey(selected);
+    const selectedIndex = normalizedOptions.indexOf(selectedKey);
+    if (selectedIndex >= 0) return options[selectedIndex];
+
+    const cleanOption = cleanChoiceOptionValue(rawLine);
+    const cleanOptionKey = normalizeChoiceOptionKey(cleanOption);
+    const cleanOptionIndex = normalizedOptions.indexOf(cleanOptionKey);
+    if (cleanOptionIndex >= 0 && hasChoiceSelectedOcrMarker(rawLine)) return options[cleanOptionIndex];
+
+    const inlineMatches = normalizedOptions
+      .map((optionKey, optionIndex) => ({ optionKey, option: options[optionIndex], matchIndex: normalizeChoiceOptionKey(rawLine).indexOf(optionKey) }))
+      .filter((item) => item.matchIndex >= 0)
+      .sort((a, b) => a.matchIndex - b.matchIndex);
+    if (inlineMatches.length && /[•●◉☑✓✔■◆◘©®]/.test(rawLine)) return inlineMatches[0].option;
+  }
+  return "";
+}
+
+function getParsedItemKey(step, question) {
+  const cleanStep = cleanOcrLabel(step).toLowerCase();
+  const cleanQuestion = cleanOcrLabel(question).toLowerCase();
+  if (cleanQuestion.includes("procurement intake process")) return "form:procurement intake process";
+  if (cleanQuestion.includes("engagement details")) return "form:engagement details";
+  if (cleanQuestion.includes("add requirements")) return "form:add requirements";
+  if (cleanQuestion.includes("type of engagement supported")) return "question:type of engagement";
+  if (cleanQuestion.includes("sales opportunity or delivery fulfillment")) return "question:sales opportunity";
+  if (cleanQuestion.includes("target date")) return "field:target date";
+  if (cleanQuestion.includes("estimated project amount")) return "field:estimated project amount";
+  if (cleanQuestion.includes("cost case")) return "question:cost case";
+  if (cleanQuestion.includes("opportunity number")) return "field:opportunity number";
+  if (cleanQuestion.includes("request type")) return "question:request type";
+  if (cleanQuestion.includes("capital expenditure")) return "question:capital expenditure";
+  if (cleanQuestion.includes("reusable assets")) return "question:reusable assets";
+  if (cleanQuestion.includes("quotation from a supplier")) return "question:quotation";
+  if (cleanQuestion.includes("upload additional documents")) return "field:upload additional documents";
+  if (cleanQuestion.includes("add watchers")) return "field:add watchers";
+  if (/button\s+continue/i.test(cleanStep)) return "button:continue";
+  return `${cleanStep}|${cleanQuestion}`;
+}
+
+function mergeParsedScreenshotSteps(primary, fallback) {
+  const primaryItems = (primary.steps || []).map((step, index) => ({ step, question: (primary.questions || [])[index] || "" }));
+  const fallbackItems = (fallback.steps || []).map((step, index) => ({ step, question: (fallback.questions || [])[index] || "" }));
+  if (!fallbackItems.length) return primary;
+
+  const merged = [];
+  const seen = new Set();
+  [...fallbackItems, ...primaryItems].forEach((item) => {
+    const key = getParsedItemKey(item.step, item.question);
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+
+  return {
+    steps: merged.map((item) => item.step),
+    questions: merged.map((item) => item.question),
+  };
+}
+
+function extractKnownProcurementStepsFromScreenshotText(text) {
+  const rawLines = splitLines(text)
+    .map((line) => normalizeOcrLine(line))
+    .filter((line) => !isBrowserChromeOcrLine(line))
+    .filter(Boolean);
+  const items = [];
+  const push = (step, question = "") => {
+    const key = getParsedItemKey(step, question);
+    if (items.some((item) => item.key === key)) return;
+    items.push({ key, step, question });
+  };
+
+  rawLines.forEach((line, index) => {
+    const cleanLine = cleanOcrLabel(line);
+    const lower = cleanLine.toLowerCase();
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) return;
+
+    if (isTopLevelScreenTitleLine(cleanLine, index)) {
+      push("form verify visible on screen", cleanLine);
+      return;
+    }
+
+    if (/^engagement details$/i.test(cleanLine) || /^add requirements$/i.test(cleanLine)) {
+      push("form verify visible on screen", cleanLine);
+      return;
+    }
+
+    if (/type of engagement supported/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["Single Customer", "Multi-Customer pool", "Kyndryl Internal Use"]);
+      if (selected) push(`select "${selected}"`, "Type of engagement supported/ will be supported by the Supplier");
+      return;
+    }
+
+    if (/sales opportunity or delivery fulfillment/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["Sales Opportunity", "Delivery Fulfillment"]);
+      if (selected) push(`select "${selected}"`, "Is this request for a sales opportunity or delivery fulfillment");
+      return;
+    }
+
+    if (/^target date\b/i.test(lower)) {
+      const dateLine = findNextUsefulOcrLine(rawLines, index + 1, (candidate) => /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i.test(candidate));
+      if (dateLine) push(`date "${dateLine.line}"`, "Target Date");
+      return;
+    }
+
+    if (/estimated project amount/i.test(lower)) {
+      const amountLine = findNextUsefulOcrLine(rawLines, index + 1, (candidate) => isCurrencyAmountLine(candidate), 10);
+      if (amountLine) {
+        const nextCurrencyCode = normalizeCurrencyCodeLine(rawLines[amountLine.index + 1] || "");
+        push(`type "${nextCurrencyCode ? `${amountLine.line} ${nextCurrencyCode}` : amountLine.line}"`, "Estimated project amount");
+      }
+      return;
+    }
+
+    if (/cost case/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["Yes", "No"], 2);
+      if (selected) push(`select ${selected.toLowerCase()}`, "Is this spend covered in the Cost Case?");
+      return;
+    }
+
+    if (/opportunity number/i.test(lower)) {
+      const opportunity = findNextUsefulOcrLine(rawLines, index + 1, (candidate) => /^[A-Z0-9]+[-_][A-Z0-9-]+$/i.test(candidate), 4);
+      if (opportunity) push(`type "${opportunity.line}"`, "Opportunity Number");
+      return;
+    }
+
+    if (/^request type$/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["New Purchase", "Resale", "Renewal"], 5);
+      if (selected) push(`select "${selected}"`, "Request type");
+      return;
+    }
+
+    if (/capital expenditure/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["Yes", "No"], 2);
+      if (selected) push(`select ${selected.toLowerCase()}`, "Will this transaction be a capital expenditure for Kyndryl?");
+      return;
+    }
+
+    if (/reusable assets/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["Yes", "No"], 2);
+      if (selected) push(`select ${selected.toLowerCase()}`, "Have you verified that there are no reusable assets available to meet your requirements?");
+      return;
+    }
+
+    if (/quotation from a supplier/i.test(lower)) {
+      const selected = getSelectedKnownOptionFromLines(rawLines, index + 1, ["Yes", "No"], 2);
+      if (selected) push(`select ${selected.toLowerCase()}`, "Do you have a quotation from a supplier?");
+      return;
+    }
+
+    if (/upload additional documents/i.test(lower) || isStandaloneUploadDropzoneLine(cleanLine)) {
+      push("document", "Upload additional documents (if any)");
+      return;
+    }
+
+    if (/add watchers/i.test(lower) || isStandaloneUserPickerLine(cleanLine)) {
+      push("assignee", "Add watchers (if any)");
+      return;
+    }
+
+    if (/^continue$/i.test(cleanLine)) push("button Continue", "");
+  });
+
+  return {
+    steps: items.map((item) => item.step),
+    questions: items.map((item) => item.question),
+  };
 }
 
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
@@ -3502,7 +3689,10 @@ async function generateFromScreenshotImport() {
     state.screenshotHasVisualContinueButton = hasVisualContinueButton;
   }
 
-  const textParsed = generateStepsFromScreenshotText(state.screenshotText, state.screenshotVisualRadioGroups);
+  const textParsed = mergeParsedScreenshotSteps(
+    generateStepsFromScreenshotText(state.screenshotText, state.screenshotVisualRadioGroups),
+    extractKnownProcurementStepsFromScreenshotText(state.screenshotText),
+  );
   if (!textParsed.steps.length) {
     state.screenshotStatus = "No usable screen text found.";
     renderApp();
@@ -4688,6 +4878,88 @@ function runSelfTests() {
       ) &&
       enhancedSplitAmountCurrencySteps.some((step) => /Do you have a quotation from a supplier/.test(step)) &&
       !enhancedSplitAmountCurrencySteps.some((step) => /question "CAN"|Opportunity Number O|CAN V/i.test(step)),
+  );
+
+  const mergedFullPageProcurementDraft = mergeParsedScreenshotSteps(
+    {
+      steps: ['select "Single Customer"', 'select "Sales Opportunity"', 'select "New Purchase"', "document", "assignee"],
+      questions: [
+        "Type of engagement supported/ will be supported by the Supplier",
+        "Is this request for a sales opportunity or delivery fulfillment",
+        "Request type",
+        "Upload additional documents (if any)",
+        "Add watchers (if any)",
+      ],
+    },
+    extractKnownProcurementStepsFromScreenshotText(
+      joinLines([
+        "Procurement Intake Process",
+        "Engagement Details",
+        "Type of engagement supported/ will be supported by the Supplier ®",
+        "• Single Customer",
+        "O Multi-Customer pool",
+        "O Kyndryl Internal Use",
+        "Is this request for a sales opportunity or delivery fulfillment ®",
+        "• Sales Opportunity",
+        "O Delivery Fulfillment",
+        "Target Date ®",
+        "Jun 11, 2026",
+        "Add Requirements",
+        "Estimated project amount ®",
+        "Insert the total expected value of the product or service for the full duration of the engagement",
+        "$ 2,822,123.74",
+        "CAN V",
+        "Is this spend covered in the Cost Case?",
+        "• Yes O No",
+        "Opportunity Number O",
+        "SOC-UYGMTPR",
+        "Request type",
+        "• New Purchase",
+        "O Resale",
+        "O Renewal",
+        "Will this transaction be a capital expenditure for Kyndryl? *",
+        "• Yes O No",
+        "Have you verified that there are no reusable assets available to meet your requirements? ®",
+        "• Yes O No",
+        "Do you have a quotation from a supplier?",
+        "O Yes • No",
+        "Upload additional documents (if any) ®",
+        "Click to Upload or drag and drop",
+        "Additional instructions for the supplier ®",
+        "Add watchers (if any) ®",
+        "Select user",
+        "Continue",
+      ]),
+    ),
+  );
+  const enhancedMergedFullPageProcurementSteps = mergedFullPageProcurementDraft.steps.map((step, index) =>
+    localEnhanceStep(step, mergedFullPageProcurementDraft.questions[index]),
+  );
+  assertCheck(
+    "full-page procurement OCR merge restores middle fields",
+    enhancedMergedFullPageProcurementSteps.includes('Verify that "Procurement Intake Process" form is visible on screen.') &&
+      enhancedMergedFullPageProcurementSteps.includes(
+        'For the question "Type of engagement supported/ will be supported by the Supplier", select "Single Customer".',
+      ) &&
+      enhancedMergedFullPageProcurementSteps.includes(
+        'For the question "Is this request for a sales opportunity or delivery fulfillment", select "Sales Opportunity".',
+      ) &&
+      enhancedMergedFullPageProcurementSteps.includes('Select "Jun 11, 2026" in the "Target Date" date field.') &&
+      enhancedMergedFullPageProcurementSteps.includes('Verify that "Add Requirements" form is visible on screen.') &&
+      enhancedMergedFullPageProcurementSteps.includes('Enter "$ 2,822,123.74 CAD" in the "Estimated project amount" field.') &&
+      enhancedMergedFullPageProcurementSteps.includes('For the question "Is this spend covered in the Cost Case?", select "Yes".') &&
+      enhancedMergedFullPageProcurementSteps.includes('Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
+      enhancedMergedFullPageProcurementSteps.includes('For the question "Request type", select "New Purchase".') &&
+      enhancedMergedFullPageProcurementSteps.includes(
+        'For the question "Will this transaction be a capital expenditure for Kyndryl?", select "Yes".',
+      ) &&
+      enhancedMergedFullPageProcurementSteps.includes(
+        'For the question "Have you verified that there are no reusable assets available to meet your requirements?", select "Yes".',
+      ) &&
+      enhancedMergedFullPageProcurementSteps.includes('For the question "Do you have a quotation from a supplier?", select "No".') &&
+      enhancedMergedFullPageProcurementSteps.includes('For the "Upload additional documents (if any)", upload a valid document.') &&
+      enhancedMergedFullPageProcurementSteps.includes('Open the "Add watchers (if any)" assignee field and select the applicable user.') &&
+      enhancedMergedFullPageProcurementSteps.includes('Click the "Continue" button.'),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
