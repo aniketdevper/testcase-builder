@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-enhanced-ocr";
+const APP_VERSION = "20260601-ocr-value-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -668,6 +668,19 @@ function cleanKnownChoiceValue(value) {
   return inferQuestionForChoiceValue(cleanValue) ? cleanValue : "";
 }
 
+function normalizeDraftPairForPreview(step, question) {
+  const cleanQuestion = cleanOcrLabel(question);
+  let cleanStep = String(step || "").trim();
+  const dateMatch = cleanStep.match(/^date\s+"(.+)"$/i);
+  const typeMatch = cleanStep.match(/^type\s+"(.+)"$/i);
+
+  if (dateMatch) cleanStep = `date "${cleanDateDisplayValue(dateMatch[1])}"`;
+  if (typeMatch && isAmountLikeFieldLabel(cleanQuestion)) cleanStep = `type "${cleanAmountDisplayValue(typeMatch[1])}"`;
+  if (typeMatch && /opportunity number/i.test(cleanQuestion)) cleanStep = `type "${cleanOpportunityNumberValue(typeMatch[1])}"`;
+
+  return { step: cleanStep, question: cleanQuestion };
+}
+
 function isScreenTitleQuestionLabel(question) {
   const cleanQuestion = cleanOcrLabel(question);
   return Boolean(cleanQuestion) && !isLikelyQuestionLabel(cleanQuestion) && !isLikelyFieldLabel(cleanQuestion) && !isChoiceFieldLabel(cleanQuestion);
@@ -679,6 +692,8 @@ function normalizeDraftStepPairs(stepLines, questionLines) {
 
   (stepLines || []).forEach((step, index) => {
     const question = (questionLines || [])[index] || "";
+    if (isEmptyOptionalParsedField({ step, question })) return;
+
     const questionChoiceValue = cleanKnownChoiceValue(question);
     const selectedValues = getQuotedValues(step);
     const knownSelectedValues = uniqueValues([questionChoiceValue, ...selectedValues.map(cleanKnownChoiceValue)].filter(Boolean));
@@ -749,7 +764,14 @@ function normalizeDraftStepPairs(stepLines, questionLines) {
     questions[index + 1] = mergedNextQuestion.label;
   }
 
-  return orderKnownDraftStepPairs(steps, questions);
+  const cleanedPairs = steps
+    .map((step, index) => normalizeDraftPairForPreview(step, questions[index] || ""))
+    .filter((item) => !isEmptyOptionalParsedField(item));
+
+  return orderKnownDraftStepPairs(
+    cleanedPairs.map((item) => item.step),
+    cleanedPairs.map((item) => item.question),
+  );
 }
 
 function isButtonLikeText(line) {
@@ -817,10 +839,59 @@ function cleanOcrLabel(value) {
     .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
     .replace(/\s*[®©ⓘ]\s*$/g, "")
     .replace(/\s*[~^˄˅⌃⌄]\s*$/g, "")
+    .replace(/\s+[A-Z]\s*$/i, (match, offset, fullText) =>
+      /\b(process|details|requirements?|section|assessment|review|summary|intake)\s*$/i.test(fullText.slice(0, offset)) ? "" : match,
+    )
     .replace(/\s+[&]\s*$/g, "")
     .replace(/\s+[oO0○◯◌☐□]\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function cleanDateDisplayValue(value) {
+  const clean = cleanOcrDisplayValue(value).replace(/\s+[@©®?\]]+$/g, "").trim();
+  const match = clean.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\s*,?\s*(\d{4})\b/i);
+  if (!match) return clean;
+  return `${titleCase(match[1])} ${Number(match[2])}, ${match[3]}`;
+}
+
+function normalizeCurrencyCode(value) {
+  const letters = String(value || "").toUpperCase().replace(/[^A-Z]/g, "");
+  if (letters === "CAN") return "CAD";
+  const match = letters.match(/\b(USD|CAD|EUR|GBP|INR)\b/) || letters.match(/(USD|CAD|EUR|GBP|INR)/);
+  return match?.[1] || "";
+}
+
+function formatIntegerWithCommas(value) {
+  return String(value || "").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function cleanAmountDisplayValue(value) {
+  const clean = cleanOcrDisplayValue(value)
+    .replace(/^S\$/i, "$")
+    .replace(/\bCAN\b/i, "CAD")
+    .replace(/\s+/g, " ")
+    .trim();
+  const currencyCode = normalizeCurrencyCode(clean);
+  const symbol = /[$€£]/.test(clean) ? "$" : "";
+  const digits = clean.replace(/\D/g, "");
+  const hasMalformedGroupedNumber = /\d{1,3},\d{5,}/.test(clean);
+  const hasDecimalNumber = /\d+[,.]\d{2}\b/.test(clean);
+
+  if ((hasMalformedGroupedNumber || hasDecimalNumber) && digits.length >= 4) {
+    const integerPart = digits.slice(0, -2).replace(/^0+(?=\d)/, "") || "0";
+    const cents = digits.slice(-2);
+    return `${symbol || "$"} ${formatIntegerWithCommas(integerPart)}.${cents}${currencyCode ? ` ${currencyCode}` : ""}`.trim();
+  }
+
+  return clean;
+}
+
+function cleanOpportunityNumberValue(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/^SCC-/i, "SOC-")
+    .replace(/\s+/g, "")
+    .replace(/[^\w-]/g, "");
 }
 
 function cleanOcrOptionValue(value) {
@@ -930,7 +1001,7 @@ function isLikelyOcrNoiseLine(line) {
   if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i.test(original)) return false;
   if (/(?:[$€£]\s*)?\d[\d,.\s]*\d\s*(?:usd|cad|eur|gbp|inr)?\b/i.test(original)) return false;
   if (/^(sack|back)\s*[|/]\s*eod$/i.test(cleanOcrDisplayValue(original))) return true;
-  if (/^[._\-\s\][|]+$/.test(original)) return true;
+  if (/^[._\-—–/\s\][|]+$/.test(original)) return true;
   const clean = original.replace(/[^A-Za-z|]/g, "").trim();
   if (!clean || OCR_OPTION_VALUES.has(clean.toLowerCase()) || isButtonLikeText(clean)) return false;
   return /^[A-Z|]{1,3}$/i.test(clean);
@@ -1190,9 +1261,13 @@ function getScreenshotFieldType(label) {
 function createScreenshotStepForValue(label, value) {
   const cleanLabel = cleanOcrLabel(label).replace(/[:*]+$/g, "").trim();
   const selectedValue = getSelectedOcrOption(value);
-  const cleanValue = cleanOcrDisplayValue(selectedValue || cleanOcrOptionValue(value));
-  const lowerValue = cleanValue.toLowerCase();
+  let cleanValue = cleanOcrDisplayValue(selectedValue || cleanOcrOptionValue(value));
   const fieldType = getScreenshotFieldType(cleanLabel);
+
+  if (fieldType === "date") cleanValue = cleanDateDisplayValue(cleanValue);
+  if (isAmountLikeFieldLabel(cleanLabel)) cleanValue = cleanAmountDisplayValue(cleanValue);
+  if (/opportunity number/i.test(cleanLabel)) cleanValue = cleanOpportunityNumberValue(cleanValue);
+  const lowerValue = cleanValue.toLowerCase();
 
   if (fieldType === "document") {
     return cleanValue && !/^(yes|no)$/i.test(cleanValue)
@@ -1668,7 +1743,10 @@ function orderKnownDraftStepPairs(steps, questions) {
 function isEmptyOptionalParsedField(item) {
   const cleanStep = cleanOcrLabel(item.step).toLowerCase();
   const cleanQuestion = cleanOcrLabel(item.question).toLowerCase();
-  return cleanStep === "field verify visible on screen" && /additional instructions|comments?|notes?/i.test(cleanQuestion);
+  const isOptionalQuestion = /additional instructions|comments?|notes?/i.test(cleanQuestion);
+  const isNoiseValueStep = /^type\s+"?[\/\\._\-—–| ]+"?$/i.test(cleanStep);
+  const isNoiseVisibleStep = /^(form|field|question)\s+verify\s+visible/i.test(cleanStep) && isLikelyOcrNoiseLine(cleanQuestion);
+  return (cleanStep === "field verify visible on screen" && isOptionalQuestion) || (isOptionalQuestion && isNoiseValueStep) || isNoiseVisibleStep;
 }
 
 function buildScreenshotParserDebug(parsed, sourceText) {
@@ -1757,7 +1835,7 @@ function extractKnownProcurementStepsFromScreenshotText(text) {
 
     if (/^target date\b/i.test(lower)) {
       const dateLine = findNextUsefulOcrLine(rawLines, index + 1, (candidate) => /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i.test(candidate));
-      if (dateLine) push(`date "${dateLine.line}"`, "Target Date");
+      if (dateLine) push(`date "${cleanDateDisplayValue(dateLine.line)}"`, "Target Date");
       return;
     }
 
@@ -1765,7 +1843,7 @@ function extractKnownProcurementStepsFromScreenshotText(text) {
       const amountLine = findNextUsefulOcrLine(rawLines, index + 1, (candidate) => isCurrencyAmountLine(candidate), 10);
       if (amountLine) {
         const nextCurrencyCode = normalizeCurrencyCodeLine(rawLines[amountLine.index + 1] || "");
-        push(`type "${nextCurrencyCode ? `${amountLine.line} ${nextCurrencyCode}` : amountLine.line}"`, "Estimated project amount");
+        push(`type "${cleanAmountDisplayValue(nextCurrencyCode ? `${amountLine.line} ${nextCurrencyCode}` : amountLine.line)}"`, "Estimated project amount");
       }
       return;
     }
@@ -1778,7 +1856,7 @@ function extractKnownProcurementStepsFromScreenshotText(text) {
 
     if (/opportunity number/i.test(lower)) {
       const opportunity = findNextUsefulOcrLine(rawLines, index + 1, (candidate) => /^[A-Z0-9]+[-_][A-Z0-9-]+$/i.test(candidate), 4);
-      if (opportunity) push(`type "${opportunity.line}"`, "Opportunity Number");
+      if (opportunity) push(`type "${cleanOpportunityNumberValue(opportunity.line)}"`, "Opportunity Number");
       return;
     }
 
@@ -5187,6 +5265,45 @@ function runSelfTests() {
       oldOrderedScreenshotRows[3]?.Steps.includes("Request type") &&
       oldOrderedScreenshotRows[4]?.Steps.includes("Upload additional documents") &&
       oldOrderedScreenshotRows[5]?.Steps.includes("Add watchers"),
+  );
+
+  const dirtyEnhancedOcrRows = buildRowsForFormat(
+    [
+      {
+        ...createStep(2),
+        details: joinLines([
+          "form verify visible on screen",
+          "form verify visible on screen",
+          'date "Jun 11,2026 @]"',
+          "form verify visible on screen",
+          'type "S$ 2,82212374 CAD"',
+          'type "SCC-UYGMTPR"',
+          "form verify visible on screen",
+          'type "/"',
+        ]),
+        questionLabel: joinLines([
+          "Procurement Intake Process B",
+          "Engagement Details A",
+          "Target Date",
+          "Add Requirements A",
+          "Estimated project amount",
+          "Opportunity Number",
+          "—",
+          "Additional instructions for the supplier",
+        ]),
+      },
+    ],
+    "each-step",
+  );
+  assertCheck(
+    "enhanced OCR artifacts are cleaned in preview",
+    dirtyEnhancedOcrRows.some((row) => row.Steps === 'Verify that "Procurement Intake Process" form is visible on screen.') &&
+      dirtyEnhancedOcrRows.some((row) => row.Steps === 'Verify that "Engagement Details" form is visible on screen.') &&
+      dirtyEnhancedOcrRows.some((row) => row.Steps === 'Select "Jun 11, 2026" in the "Target Date" date field.') &&
+      dirtyEnhancedOcrRows.some((row) => row.Steps === 'Verify that "Add Requirements" form is visible on screen.') &&
+      dirtyEnhancedOcrRows.some((row) => row.Steps === 'Enter "$ 2,822,123.74 CAD" in the "Estimated project amount" field.') &&
+      dirtyEnhancedOcrRows.some((row) => row.Steps === 'Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
+      !dirtyEnhancedOcrRows.some((row) => /Process B|Details A|Requirements A|Jun 11,2026|S\$|SCC-|form or information|Additional instructions/.test(row.Steps)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
