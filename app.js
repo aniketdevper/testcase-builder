@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-misplaced-choice-repair";
+const APP_VERSION = "20260601-split-amount-currency-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -817,6 +817,7 @@ function cleanOcrLabel(value) {
     .replace(/\s*[®©ⓘ]\s*$/g, "")
     .replace(/\s*[~^˄˅⌃⌄]\s*$/g, "")
     .replace(/\s+[&]\s*$/g, "")
+    .replace(/\s+[oO0○◯◌☐□]\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1414,6 +1415,13 @@ function isCurrencyAmountLine(line) {
   return /(?:[$€£]\s*)?\d[\d,.\s]*\d\s*(?:usd|cad|eur|gbp|inr)?\b/i.test(cleanOcrDisplayValue(line));
 }
 
+function normalizeCurrencyCodeLine(line) {
+  const cleanLine = cleanOcrDisplayValue(line).toUpperCase().replace(/[^A-Z]/g, "");
+  if (cleanLine === "CAN") return "CAD";
+  if (["USD", "CAD", "EUR", "GBP", "INR"].includes(cleanLine)) return cleanLine;
+  return "";
+}
+
 const TRAILING_FIELD_LABEL_PATTERNS = [
   "Request type",
   "Target Date",
@@ -1818,9 +1826,11 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     }
 
     if (pendingLabel && !pendingOptions && isAmountLikeFieldLabel(pendingLabel) && isCurrencyAmountLine(cleanLine)) {
-      generated.push(createScreenshotStepForValue(pendingLabel, cleanLine));
+      const nextCurrencyCode = normalizeCurrencyCodeLine(nextLine);
+      generated.push(createScreenshotStepForValue(pendingLabel, nextCurrencyCode ? `${cleanLine} ${nextCurrencyCode}` : cleanLine));
       pendingLabel = "";
       pendingOptions = false;
+      if (nextCurrencyCode) skipUntilLineIndex = lineIndex + 1;
       return;
     }
 
@@ -4637,6 +4647,47 @@ function runSelfTests() {
       repairedMisplacedChoiceRows[3]?.Steps === 'For the "Upload additional documents (if any)", upload a valid document.' &&
       repairedMisplacedChoiceRows[4]?.Steps === 'Open the "Add watchers (if any)" assignee field and select the applicable user.' &&
       !repairedMisplacedChoiceRows.some((row) => /©|OQ ves|saectuser|New Purchase form|Click to Upload/i.test(row.Steps)),
+  );
+
+  const splitAmountCurrencyDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Target Date",
+      "Jun 11, 2026",
+      "Add Requirements",
+      "Estimated project amount ®",
+      "Insert the total expected value of the product or service for the full duration of the engagement",
+      "$ 2,822,123.74",
+      "CAN V",
+      "Is this spend covered in the Cost Case?",
+      "• Yes • No",
+      "Opportunity Number O",
+      "SOC-UYGMTPR",
+      "Will this transaction be a capital expenditure for Kyndryl? *",
+      "• Yes • No",
+      "Have you verified that there are no reusable assets available to meet your requirements? ®",
+      "• Yes O No",
+      "Do you have a quotation from a supplier?",
+      "• Yes • No",
+    ]),
+  );
+  const enhancedSplitAmountCurrencySteps = splitAmountCurrencyDraft.steps.map((step, index) =>
+    localEnhanceStep(step, splitAmountCurrencyDraft.questions[index]),
+  );
+  assertCheck(
+    "split amount currency and trailing radio labels are cleaned",
+    enhancedSplitAmountCurrencySteps.includes('Select "Jun 11, 2026" in the "Target Date" date field.') &&
+      enhancedSplitAmountCurrencySteps.includes('Verify that "Add Requirements" form is visible on screen.') &&
+      enhancedSplitAmountCurrencySteps.includes('Enter "$ 2,822,123.74 CAD" in the "Estimated project amount" field.') &&
+      enhancedSplitAmountCurrencySteps.includes('For the question "Is this spend covered in the Cost Case?", select "Yes".') &&
+      enhancedSplitAmountCurrencySteps.includes('Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
+      enhancedSplitAmountCurrencySteps.includes(
+        'For the question "Will this transaction be a capital expenditure for Kyndryl?", select "Yes".',
+      ) &&
+      enhancedSplitAmountCurrencySteps.includes(
+        'For the question "Have you verified that there are no reusable assets available to meet your requirements?", select "Yes".',
+      ) &&
+      enhancedSplitAmountCurrencySteps.some((step) => /Do you have a quotation from a supplier/.test(step)) &&
+      !enhancedSplitAmountCurrencySteps.some((step) => /question "CAN"|Opportunity Number O|CAN V/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
