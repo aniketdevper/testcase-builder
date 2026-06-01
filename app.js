@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-known-field-merge";
+const APP_VERSION = "20260601-ordered-ocr-fields";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -766,8 +766,8 @@ function isLikelyStandaloneValue(line) {
   return false;
 }
 
-const OCR_SELECTED_MARKER_PATTERN = /[©®●◉☑✓✔■◆◘]/;
-const OCR_SELECTED_MARKER_REPLACE_PATTERN = /[©®●◉☑✓✔■◆◘]/g;
+const OCR_SELECTED_MARKER_PATTERN = /[•©®●◉☑✓✔■◆◘]/;
+const OCR_SELECTED_MARKER_REPLACE_PATTERN = /[•©®●◉☑✓✔■◆◘]/g;
 const OCR_UNSELECTED_MARKER_PATTERN = /(^|\s)[oO0○◯◌☐□](?=\s+(yes|no|high|medium|low|n\/a|na|not applicable)\b)/gi;
 const OCR_OPTION_VALUES = new Set(["yes", "no", "high", "medium", "low", "n/a", "na", "not applicable"]);
 const CHOICE_OPTION_PREFIXES = new Set([
@@ -797,7 +797,7 @@ function normalizeOcrLine(line) {
     .replace(/\s+x$/i, "")
     .replace(/[|]\s*/g, " | ")
     .replace(/\s+/g, " ")
-    .replace(/^[•*-]\s*/, "")
+    .replace(/^[*-]\s*/, "")
     .trim();
 }
 
@@ -884,7 +884,7 @@ function getSelectedOcrOption(line) {
   const text = normalizeOcrLine(line);
   if (!OCR_SELECTED_MARKER_PATTERN.test(text)) return inferSelectedOcrOptionFromUnselectedMarkers(text);
 
-  const markerBeforeMatch = text.match(/[©®●◉☑✓✔■◆◘]\s*([^©®●◉☑✓✔■◆◘]+)/);
+  const markerBeforeMatch = text.match(/[•©®●◉☑✓✔■◆◘]\s*([^•©®●◉☑✓✔■◆◘]+)/);
   if (markerBeforeMatch) {
     const selected = cleanOcrOptionValue(markerBeforeMatch[1]);
     const selectedPrefix = selected.match(/^(yes|no|high|medium|low|n\/a|na|not applicable)\s*[:：]/i)?.[1];
@@ -897,7 +897,7 @@ function getSelectedOcrOption(line) {
     if (selected) return titleCase(selected);
   }
 
-  const markerAfterMatch = text.match(/([^©®●◉☑✓✔■◆◘]+)\s*[©®●◉☑✓✔■◆◘]/);
+  const markerAfterMatch = text.match(/([^•©®●◉☑✓✔■◆◘]+)\s*[•©®●◉☑✓✔■◆◘]/);
   if (markerAfterMatch) {
     const selected = cleanOcrOptionValue(markerAfterMatch[1]).split(/\s+/).slice(-2).join(" ");
     if (selected) return titleCase(selected);
@@ -1621,6 +1621,38 @@ function getParsedItemKey(step, question) {
   return `${cleanStep}|${cleanQuestion}`;
 }
 
+const KNOWN_PARSED_ITEM_ORDER = new Map(
+  [
+    "form:procurement intake process",
+    "form:engagement details",
+    "question:type of engagement",
+    "question:sales opportunity",
+    "field:target date",
+    "form:add requirements",
+    "field:estimated project amount",
+    "question:cost case",
+    "field:opportunity number",
+    "question:request type",
+    "question:capital expenditure",
+    "question:reusable assets",
+    "question:quotation",
+    "field:upload additional documents",
+    "field:add watchers",
+    "button:continue",
+  ].map((key, index) => [key, index]),
+);
+
+function getParsedItemRank(item, fallbackIndex) {
+  const key = getParsedItemKey(item.step, item.question);
+  return KNOWN_PARSED_ITEM_ORDER.has(key) ? KNOWN_PARSED_ITEM_ORDER.get(key) : 1000 + fallbackIndex;
+}
+
+function isEmptyOptionalParsedField(item) {
+  const cleanStep = cleanOcrLabel(item.step).toLowerCase();
+  const cleanQuestion = cleanOcrLabel(item.question).toLowerCase();
+  return cleanStep === "field verify visible on screen" && /additional instructions|comments?|notes?/i.test(cleanQuestion);
+}
+
 function mergeParsedScreenshotSteps(primary, fallback) {
   const primaryItems = (primary.steps || []).map((step, index) => ({ step, question: (primary.questions || [])[index] || "" }));
   const fallbackItems = (fallback.steps || []).map((step, index) => ({ step, question: (fallback.questions || [])[index] || "" }));
@@ -1628,12 +1660,15 @@ function mergeParsedScreenshotSteps(primary, fallback) {
 
   const merged = [];
   const seen = new Set();
-  [...fallbackItems, ...primaryItems].forEach((item) => {
+  [...fallbackItems, ...primaryItems].forEach((item, order) => {
+    if (isEmptyOptionalParsedField(item)) return;
     const key = getParsedItemKey(item.step, item.question);
     if (seen.has(key)) return;
     seen.add(key);
-    merged.push(item);
+    merged.push({ ...item, order });
   });
+
+  merged.sort((a, b) => getParsedItemRank(a, a.order) - getParsedItemRank(b, b.order));
 
   return {
     steps: merged.map((item) => item.step),
@@ -4935,6 +4970,8 @@ function runSelfTests() {
   const enhancedMergedFullPageProcurementSteps = mergedFullPageProcurementDraft.steps.map((step, index) =>
     localEnhanceStep(step, mergedFullPageProcurementDraft.questions[index]),
   );
+  const uploadStepIndex = enhancedMergedFullPageProcurementSteps.findIndex((step) => /Upload additional documents/i.test(step));
+  const requestTypeStepIndex = enhancedMergedFullPageProcurementSteps.findIndex((step) => /question "Request type"/i.test(step));
   assertCheck(
     "full-page procurement OCR merge restores middle fields",
     enhancedMergedFullPageProcurementSteps.includes('Verify that "Procurement Intake Process" form is visible on screen.') &&
@@ -4959,7 +4996,10 @@ function runSelfTests() {
       enhancedMergedFullPageProcurementSteps.includes('For the question "Do you have a quotation from a supplier?", select "No".') &&
       enhancedMergedFullPageProcurementSteps.includes('For the "Upload additional documents (if any)", upload a valid document.') &&
       enhancedMergedFullPageProcurementSteps.includes('Open the "Add watchers (if any)" assignee field and select the applicable user.') &&
-      enhancedMergedFullPageProcurementSteps.includes('Click the "Continue" button.'),
+      enhancedMergedFullPageProcurementSteps.includes('Click the "Continue" button.') &&
+      requestTypeStepIndex >= 0 &&
+      uploadStepIndex > requestTypeStepIndex &&
+      !enhancedMergedFullPageProcurementSteps.some((step) => /Additional instructions.*visible/i.test(step)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
