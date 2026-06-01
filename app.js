@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260529-request-details-preview-repair";
+const APP_VERSION = "20260601-full-page-radio-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -642,9 +642,75 @@ function isVisibleFieldDraftStep(step) {
   return /^(field|dropdown|date|assignee|supplier|document)\b.*\b(verify|visible|screen|available|upload)$/i.test(String(step || "").trim());
 }
 
+const KNOWN_CHOICE_QUESTION_BY_VALUE = [
+  {
+    pattern: /^(single customer|multi-customer pool|kyndryl internal use)$/i,
+    question: "Type of engagement supported/ will be supported by the Supplier",
+  },
+  {
+    pattern: /^(sales opportunity|delivery fulfillment)$/i,
+    question: "Is this request for a sales opportunity or delivery fulfillment",
+  },
+  {
+    pattern: /^(new purchase|resale|renewal)$/i,
+    question: "Request type",
+  },
+];
+
+function inferQuestionForChoiceValue(value) {
+  const cleanValue = cleanOcrDisplayValue(value);
+  return KNOWN_CHOICE_QUESTION_BY_VALUE.find((item) => item.pattern.test(cleanValue))?.question || "";
+}
+
+function isScreenTitleQuestionLabel(question) {
+  const cleanQuestion = cleanOcrLabel(question);
+  return Boolean(cleanQuestion) && !isLikelyQuestionLabel(cleanQuestion) && !isLikelyFieldLabel(cleanQuestion) && !isChoiceFieldLabel(cleanQuestion);
+}
+
 function normalizeDraftStepPairs(stepLines, questionLines) {
-  const steps = [...(stepLines || [])];
-  const questions = [...(questionLines || [])];
+  const steps = [];
+  const questions = [];
+
+  (stepLines || []).forEach((step, index) => {
+    const question = (questionLines || [])[index] || "";
+    const selectedValues = getQuotedValues(step);
+    const shouldSplitInferredChoices =
+      /^select multiple\s+/i.test(String(step || "")) &&
+      selectedValues.length > 1 &&
+      (isScreenTitleQuestionLabel(question) || isMalformedChoiceQuestionLabel(question));
+
+    if (shouldSplitInferredChoices) {
+      const inferred = selectedValues.map((value) => ({ value, question: inferQuestionForChoiceValue(value) }));
+      if (inferred.every((item) => item.question)) {
+        inferred.forEach((item) => {
+          steps.push(`select "${item.value}"`);
+          questions.push(item.question);
+        });
+        return;
+      }
+    }
+
+    if (/^select\s+("?)(new purchase|resale|renewal)\1$/i.test(String(step || "").trim()) && isMalformedChoiceQuestionLabel(question)) {
+      steps.push(step);
+      questions.push("Request type");
+      return;
+    }
+
+    if (/^document\b/i.test(String(step || "").trim()) && isStandaloneUploadDropzoneLine(question)) {
+      steps.push(step);
+      questions.push("Upload additional documents (if any)");
+      return;
+    }
+
+    if (/^assignee\b/i.test(String(step || "").trim()) && isStandaloneUserPickerLine(question)) {
+      steps.push(step);
+      questions.push("Add watchers (if any)");
+      return;
+    }
+
+    steps.push(step);
+    questions.push(question);
+  });
 
   for (let index = 0; index < steps.length - 1; index += 1) {
     const mergedNextQuestion = splitValueAndTrailingFieldLabel(questions[index + 1]);
@@ -877,6 +943,16 @@ function isLikelyQuestionLabel(line) {
   return /^(who|what|when|where|which|why|how|will|does|do|is|are|can|should|would|has|have)\b/i.test(String(line || "").trim());
 }
 
+function isTopLevelScreenTitleLine(line, lineIndex) {
+  const cleanLine = cleanOcrLabel(line);
+  if (lineIndex > 1 || !cleanLine || cleanLine.length > 90) return false;
+  if (/[?]$/.test(cleanLine) || isButtonLikeText(cleanLine) || isLikelyQuestionLabel(cleanLine) || isLikelyFieldLabel(cleanLine) || isChoiceFieldLabel(cleanLine)) {
+    return false;
+  }
+  if (hasChoiceSelectedOcrMarker(cleanLine) || hasUnselectedOcrMarker(cleanLine) || isOcrOptionOnlyLine(cleanLine)) return false;
+  return /\b(process|intake|agent|request|onboarding|review|assessment|dashboard|portal)\b/i.test(cleanLine);
+}
+
 function isLikelyFieldLabel(line) {
   return /(amount|entity|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
     String(line || ""),
@@ -891,6 +967,23 @@ function isChoiceFieldLabel(line) {
 
 function isMultiSelectQuestionLabel(line) {
   return /(types of internal information|internal information|access, store, or process|store, or process)/i.test(String(line || ""));
+}
+
+function isMalformedChoiceQuestionLabel(line) {
+  const cleanLine = cleanOcrLabel(line);
+  if (!cleanLine || cleanLine.length > 30) return false;
+  if (isLikelyQuestionLabel(cleanLine) || isLikelyFieldLabel(cleanLine) || isChoiceFieldLabel(cleanLine)) return false;
+  const compact = cleanLine.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return /(yes|ves|no|n0)/i.test(compact) && /[o0q]/i.test(compact);
+}
+
+function isStandaloneUploadDropzoneLine(line) {
+  return /\bclick\s+to\s+upload\b|\bdrag\s+and\s+drop\b/i.test(cleanOcrDisplayValue(line));
+}
+
+function isStandaloneUserPickerLine(line) {
+  const compact = cleanOcrDisplayValue(line).toLowerCase().replace(/[^a-z]/g, "");
+  return /selectuser|saectuser|seiectuser|slectuser/.test(compact);
 }
 
 function isInformationalTextLine(line) {
@@ -1044,7 +1137,9 @@ function getScreenshotFieldType(label) {
   if (/assessment needed/.test(lower)) return "question";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
   if (isSupplierCardLabel(label)) return "supplier";
-  if (/\b(upload|document|attachment|certificate|proof|w-9|w9|capa|soc|iso|quotation)\b/.test(lower)) return "document";
+  if (/\b(upload|document|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
+    return "document";
+  }
   if (isChoiceFieldLabel(label)) return "question";
   if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|entity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
     return "dropdown";
@@ -1337,7 +1432,7 @@ function canReplacePendingGeneratedStep(item) {
 }
 
 function isUserPickerPlaceholderLine(line) {
-  return /\bselect\s+user\b/i.test(cleanOcrDisplayValue(line));
+  return /\bselect\s+user\b/i.test(cleanOcrDisplayValue(line)) || isStandaloneUserPickerLine(line);
 }
 
 function isFieldValueBoundaryLine(line, hasCollectedValue = false) {
@@ -1499,6 +1594,24 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       nextLineIsOptionOnly;
 
     if (isLikelyOcrNoiseLine(cleanLine)) return;
+
+    if (!pendingLabel && isTopLevelScreenTitleLine(cleanLine, lineIndex)) {
+      generated.push({ step: "form verify visible on screen", question: cleanOcrLabel(cleanLine) });
+      hasGeneratedFirstScreenStep = true;
+      return;
+    }
+
+    if (!pendingLabel && isMalformedChoiceQuestionLabel(cleanLine)) return;
+
+    if (!pendingLabel && isStandaloneUploadDropzoneLine(cleanLine)) {
+      generated.push({ step: "document", question: "Upload additional documents (if any)" });
+      return;
+    }
+
+    if (!pendingLabel && isStandaloneUserPickerLine(cleanLine)) {
+      generated.push({ step: "assignee", question: "Add watchers (if any)" });
+      return;
+    }
 
     if (!pendingLabel && isEmailLine(cleanLine)) return;
 
@@ -4384,6 +4497,97 @@ function runSelfTests() {
     repairedPreviewRows[1]?.Steps === 'Enter "SOC-UYGMTPR" in the "Opportunity Number" field.' &&
       repairedPreviewRows[2]?.Steps === 'For the question "Request type", select "Resale".' &&
       !repairedPreviewRows.some((row) => /Opportunity Number.*visible|SOC-UYGMTPR Request type/i.test(row.Steps)),
+  );
+
+  const fullPageRequestDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Procurement Intake Process",
+      "Engagement Details",
+      "Type of engagement supported/ will be supported by the Supplier ®",
+      "© Single Customer",
+      "Multi-Customer pool",
+      "Kyndryl Internal Use",
+      "Is this request for a sales opportunity or delivery fulfillment ®",
+      "© Sales Opportunity",
+      "Delivery Fulfillment",
+      "Target Date ®",
+      "Jun 11, 2026",
+      "Add Requirements",
+      "Estimated project amount ®",
+      "Insert the total expected value of the product or service for the full duration of the engagement",
+      "$ 2,822,123.74 CAD",
+      "Is this spend covered in the Cost Case?",
+      "© Yes O No",
+      "Opportunity Number ®",
+      "SOC-UYGMTPR",
+      "Request type",
+      "© New Purchase",
+      "Resale",
+      "Renewal",
+      "Will this transaction be a capital expenditure for Kyndryl? ®",
+      "© Yes O No",
+      "Have you verified that there are no reusable assets available to meet your requirements? ®",
+      "© Yes O No",
+      "Do you have a quotation from a supplier?",
+      "O Yes © No",
+      "Upload additional documents (if any) ®",
+      "Click to Upload or drag and drop",
+      "Additional instructions for the supplier ®",
+      "Add watchers (if any) ®",
+      "(3 saectuser 8",
+      "Continue",
+    ]),
+  );
+  const enhancedFullPageRequestDetailsSteps = fullPageRequestDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, fullPageRequestDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "full page procurement screenshot keeps radio groups and fields separate",
+    enhancedFullPageRequestDetailsSteps.includes('Verify that "Procurement Intake Process" form is visible on screen.') &&
+      enhancedFullPageRequestDetailsSteps.includes(
+        'For the question "Type of engagement supported/ will be supported by the Supplier", select "Single Customer".',
+      ) &&
+      enhancedFullPageRequestDetailsSteps.includes(
+        'For the question "Is this request for a sales opportunity or delivery fulfillment", select "Sales Opportunity".',
+      ) &&
+      enhancedFullPageRequestDetailsSteps.includes('Select "Jun 11, 2026" in the "Target Date" date field.') &&
+      enhancedFullPageRequestDetailsSteps.includes('Enter "$ 2,822,123.74 CAD" in the "Estimated project amount" field.') &&
+      enhancedFullPageRequestDetailsSteps.includes('For the question "Is this spend covered in the Cost Case?", select "Yes".') &&
+      enhancedFullPageRequestDetailsSteps.includes('Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
+      enhancedFullPageRequestDetailsSteps.includes('For the question "Request type", select "New Purchase".') &&
+      enhancedFullPageRequestDetailsSteps.includes(
+        'For the question "Will this transaction be a capital expenditure for Kyndryl?", select "Yes".',
+      ) &&
+      enhancedFullPageRequestDetailsSteps.includes(
+        'For the question "Have you verified that there are no reusable assets available to meet your requirements?", select "Yes".',
+      ) &&
+      enhancedFullPageRequestDetailsSteps.includes('For the question "Do you have a quotation from a supplier?", select "No".') &&
+      enhancedFullPageRequestDetailsSteps.includes('For the "Upload additional documents (if any)", upload a valid document.') &&
+      enhancedFullPageRequestDetailsSteps.includes('Open the "Add watchers (if any)" assignee field and select the applicable user.') &&
+      enhancedFullPageRequestDetailsSteps.includes('Click the "Continue" button.') &&
+      !enhancedFullPageRequestDetailsSteps.some((step) => /Procurement Intake Process.*Single Customer|OQ ves|saectuser|Click to Upload.*upload/i.test(step)),
+  );
+
+  const repairedFullPageBadRows = buildRowsForFormat(
+    [
+      {
+        ...createStep(5),
+        details: joinLines(['select multiple "Single Customer" "Sales Opportunity"', 'select "New Purchase"', "document", "assignee"]),
+        questionLabel: joinLines(["Procurement Intake Process", "OQ ves (No", "& Click to Upload or drag and drop", "(3 saectuser 8"]),
+      },
+    ],
+    "each-step",
+  );
+  assertCheck(
+    "preview repairs full page merged radio and noisy control labels",
+    repairedFullPageBadRows[0]?.Steps ===
+      'For the question "Type of engagement supported/ will be supported by the Supplier", select "Single Customer".' &&
+      repairedFullPageBadRows[1]?.Steps ===
+        'For the question "Is this request for a sales opportunity or delivery fulfillment", select "Sales Opportunity".' &&
+      repairedFullPageBadRows[2]?.Steps === 'For the question "Request type", select "New Purchase".' &&
+      repairedFullPageBadRows[3]?.Steps === 'For the "Upload additional documents (if any)", upload a valid document.' &&
+      repairedFullPageBadRows[4]?.Steps === 'Open the "Add watchers (if any)" assignee field and select the applicable user.' &&
+      !repairedFullPageBadRows.some((row) => /Procurement Intake Process.*select|OQ ves|saectuser|Click to Upload/i.test(row.Steps)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
