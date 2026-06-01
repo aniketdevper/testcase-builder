@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-parser-debug";
+const APP_VERSION = "20260601-enhanced-ocr";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -3335,6 +3335,40 @@ function readFileAsDataUrl(file) {
   });
 }
 
+function scoreOcrText(text) {
+  const lines = splitLines(text);
+  const lower = String(text || "").toLowerCase();
+  const fieldHints = [
+    "type of engagement",
+    "sales opportunity",
+    "target date",
+    "estimated project amount",
+    "cost case",
+    "opportunity number",
+    "request type",
+    "capital expenditure",
+    "reusable assets",
+    "quotation from a supplier",
+    "upload additional documents",
+    "add watchers",
+  ];
+  const foundHints = fieldHints.filter((hint) => lower.includes(hint)).length;
+  const valueSignals = [
+    /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},\s*\d{4}\b/i,
+    /[$€£]\s*\d[\d,.\s]*/i,
+    /\b[A-Z0-9]+[-_][A-Z0-9-]+\b/,
+  ].filter((pattern) => pattern.test(text)).length;
+  const selectedSignals = (String(text || "").match(OCR_SELECTED_MARKER_PATTERN) || []).length;
+  return lines.length + foundHints * 12 + valueSignals * 8 + selectedSignals * 2;
+}
+
+function selectBestOcrText(candidates) {
+  return candidates
+    .map((text) => String(text || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => scoreOcrText(b) - scoreOcrText(a))[0] || "";
+}
+
 function loadExternalScriptOnce(src, globalName) {
   if (globalName && window[globalName]) return Promise.resolve(window[globalName]);
 
@@ -3359,8 +3393,15 @@ async function extractTextWithTesseract(file) {
   const worker = await createTesseractWorker("screenshot");
 
   try {
-    const result = await worker.recognize(file);
-    return result?.data?.text || "";
+    state.screenshotStatus = "Running enhanced OCR...";
+    renderApp();
+    const originalResult = await worker.recognize(file);
+    const enhancedImage = await createEnhancedOcrImage(file).catch((error) => {
+      console.warn("Unable to prepare enhanced OCR image", error);
+      return "";
+    });
+    const enhancedResult = enhancedImage ? await worker.recognize(enhancedImage) : null;
+    return selectBestOcrText([originalResult?.data?.text || "", enhancedResult?.data?.text || ""]);
   } finally {
     await worker.terminate();
   }
@@ -3388,22 +3429,76 @@ async function createTesseractWorker(contextLabel = "OCR") {
   });
 }
 
+async function getImageSourceFromFile(file) {
+  if (typeof createImageBitmap === "function") return createImageBitmap(file);
+  const dataUrl = await readFileAsDataUrl(file);
+  return loadImageElement(dataUrl);
+}
+
+async function createEnhancedOcrImage(file) {
+  if (typeof document === "undefined") return "";
+
+  const source = await getImageSourceFromFile(file);
+  const sourceWidth = source.naturalWidth || source.width;
+  const sourceHeight = source.naturalHeight || source.height;
+  if (!sourceWidth || !sourceHeight) return "";
+
+  const widthScale = Math.min(3, Math.max(1.35, 2600 / sourceWidth));
+  const heightScale = Math.min(widthScale, 5200 / sourceHeight);
+  const scale = Math.max(1, heightScale);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return "";
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+    let value = (gray - 128) * 1.55 + 128;
+    if (value > 238) value = 255;
+    if (value < 55) value = 0;
+    data[index] = value;
+    data[index + 1] = value;
+    data[index + 2] = value;
+    data[index + 3] = 255;
+  }
+  context.putImageData(imageData, 0, 0);
+
+  return canvas.toDataURL("image/png");
+}
+
 async function extractTextFromImageIfAvailable(file) {
   if (typeof TextDetector === "undefined" || typeof createImageBitmap !== "function") {
     return extractTextWithTesseract(file);
   }
 
+  let browserText = "";
   try {
     state.screenshotStatus = "Running browser OCR...";
     renderApp();
     const bitmap = await createImageBitmap(file);
     const detector = new TextDetector();
     const detections = await detector.detect(bitmap);
-    const text = detections.map((item) => item.rawValue).filter(Boolean).join(NEWLINE);
-    return text || extractTextWithTesseract(file);
+    browserText = detections.map((item) => item.rawValue).filter(Boolean).join(NEWLINE);
   } catch (error) {
     console.warn("Browser OCR failed, trying Tesseract.js", error);
-    return extractTextWithTesseract(file);
+  }
+
+  try {
+    const tesseractText = await extractTextWithTesseract(file);
+    return selectBestOcrText([browserText, tesseractText]);
+  } catch (error) {
+    console.warn("Enhanced OCR failed, using browser OCR result", error);
+    return browserText;
   }
 }
 
@@ -4497,6 +4592,20 @@ function runSelfTests() {
   assertCheck("start task wording", localEnhanceStep("start task Procurement Review", "") === 'Click on "Start" for the "Procurement Review" task.');
   assertCheck("infer selected yes from OCR radio markers", getSelectedOcrOption("Yes O No") === "Yes");
   assertCheck("infer selected no from OCR radio markers", getSelectedOcrOption("O Yes No") === "No");
+  assertCheck(
+    "enhanced OCR scoring prefers text with important field labels",
+    scoreOcrText(
+      joinLines([
+        "Target Date",
+        "Jun 11, 2026",
+        "Estimated project amount",
+        "$ 2,822,123.74",
+        "Opportunity Number",
+        "SOC-UYGMTPR",
+        "Request type",
+      ]),
+    ) > scoreOcrText(joinLines(["Procurement Intake Process x", "© Single Customer", "© Sales Opportunity", "& Click to Upload or drag and drop"])),
+  );
   assertCheck("toggle wording", localEnhanceStep("toggle No", "Subject to Withholding tax?") === 'Set the "Subject to Withholding tax?" toggle to "No".');
   assertCheck("auto populated wording", localEnhanceStep("auto TechTest", "Company name") === 'Verify that the "Company name" field is auto-populated with "TechTest".');
   assertCheck("auto-populated shorthand wording", localEnhanceStep("auto-populated TechTest", "Company name") === 'Verify that the "Company name" field is auto-populated with "TechTest".');
