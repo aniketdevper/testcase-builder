@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-summary-page-parser";
+const APP_VERSION = "20260601-cumulative-screenshot-import";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -99,7 +99,9 @@ const state = {
   screenshotDebug: "",
   screenshotVisualRadioGroups: [],
   screenshotHasVisualContinueButton: false,
+  screenshotImportSerial: 0,
   lastScreenshotStepId: null,
+  lastScreenshotImportKey: "",
   steps: [],
   exportContent: "",
   exportFileName: "",
@@ -4010,6 +4012,32 @@ function applyVisualActionFallbacks(parsed, hasVisualContinueButton, sourceText 
   return { steps, questions };
 }
 
+function buildScreenshotImportKey() {
+  const keyText = [
+    state.screenshotImportSerial,
+    state.screenshotFileName,
+    normalizeNewlines(state.screenshotText),
+    JSON.stringify(state.screenshotVisualRadioGroups || []),
+    state.screenshotHasVisualContinueButton ? "visual-action" : "no-visual-action",
+  ].join(NEWLINE);
+
+  return `screenshot-${crc32(stringToUtf8(keyText)).toString(16)}`;
+}
+
+function mergeScreenshotDraftStep(steps, step, importKey, lastStepId, lastImportKey) {
+  const previousScreenshotIndex = importKey && importKey === lastImportKey ? steps.findIndex((item) => item.id === lastStepId) : -1;
+
+  if (steps.length === 1 && isBlankEditableStep(steps[0])) {
+    return [step];
+  }
+
+  if (previousScreenshotIndex >= 0) {
+    return steps.map((item, index) => (index === previousScreenshotIndex ? step : item)).filter((item) => !isContinueOnlyScreenshotDraft(item));
+  }
+
+  return [...steps.filter((item) => !isContinueOnlyScreenshotDraft(item)), step];
+}
+
 function formatTimestamp(seconds) {
   const safeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
   const minutes = Math.floor(safeSeconds / 60);
@@ -4017,8 +4045,9 @@ function formatTimestamp(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
- async function handleScreenshotFile(file) {
+async function handleScreenshotFile(file) {
   if (!file) return;
+  state.screenshotImportSerial += 1;
   state.screenshotFileName = file.name;
   state.screenshotStatus = "Reading screenshot...";
 
@@ -4100,23 +4129,10 @@ async function generateFromScreenshotImport() {
   step.details = joinLines(parsed.steps);
   step.questionLabel = joinLines(parsed.questions);
   state.activeSavedFile = null;
-  const previousScreenshotIndex = state.steps.findIndex((item) => item.id === state.lastScreenshotStepId);
-  const replaceIndex =
-    previousScreenshotIndex >= 0
-      ? previousScreenshotIndex
-      : state.steps.findLastIndex
-        ? state.steps.findLastIndex((item) => item.source === "screenshot-import" || isLikelyScreenshotDraftStep(item) || isContinueOnlyScreenshotDraft(item))
-        : [...state.steps].reverse().findIndex((item) => item.source === "screenshot-import" || isLikelyScreenshotDraftStep(item) || isContinueOnlyScreenshotDraft(item));
-
-  if (state.steps.length === 1 && isBlankEditableStep(state.steps[0])) {
-    state.steps = [step];
-  } else if (replaceIndex >= 0) {
-    const safeReplaceIndex = state.steps.findLastIndex ? replaceIndex : state.steps.length - 1 - replaceIndex;
-    state.steps = state.steps.map((item, index) => (index === safeReplaceIndex ? step : item)).filter((item) => !isContinueOnlyScreenshotDraft(item));
-  } else {
-    state.steps = [...state.steps.filter((item) => !isContinueOnlyScreenshotDraft(item)), step];
-  }
+  const importKey = buildScreenshotImportKey();
+  state.steps = mergeScreenshotDraftStep(state.steps, step, importKey, state.lastScreenshotStepId, state.lastScreenshotImportKey);
   state.lastScreenshotStepId = step.id;
+  state.lastScreenshotImportKey = importKey;
   state.screenshotStatus = `Generated ${parsed.steps.length} draft step${parsed.steps.length === 1 ? "" : "s"} with parser ${APP_VERSION}.`;
   renderApp();
 }
@@ -4129,7 +4145,9 @@ function clearScreenshotImport() {
   state.screenshotDebug = "";
   state.screenshotVisualRadioGroups = [];
   state.screenshotHasVisualContinueButton = false;
+  state.screenshotImportSerial += 1;
   state.lastScreenshotStepId = null;
+  state.lastScreenshotImportKey = "";
 }
 
 function toggleColumn(column) {
@@ -5492,6 +5510,36 @@ function runSelfTests() {
       /Special Handling/.test(submissionSummaryRows[2]?.Steps || "") &&
       submissionSummaryRows[3]?.Steps === 'Click the "Submit" button.' &&
       !submissionSummaryRows.some((row) => /SLA timeframes|responsible for delivering|form or information|Enter "Full Buying/.test(row.Steps)),
+  );
+
+  const blankScreenshotStep = createStep(1);
+  const firstScreenshotStep = { ...createStep(1), id: "first-screenshot", details: "form verify visible on screen", questionLabel: "First screen" };
+  const secondScreenshotStep = { ...createStep(2), id: "second-screenshot", details: "button Continue", questionLabel: "" };
+  const regeneratedSecondScreenshotStep = {
+    ...createStep(2),
+    id: "second-screenshot-regenerated",
+    details: joinLines(["form verify visible on screen", "button Continue"]),
+    questionLabel: joinLines(["Second screen", ""]),
+  };
+  const firstScreenshotMerge = mergeScreenshotDraftStep([blankScreenshotStep], firstScreenshotStep, "screen-1", null, "");
+  const secondScreenshotMerge = mergeScreenshotDraftStep(firstScreenshotMerge, secondScreenshotStep, "screen-2", firstScreenshotStep.id, "screen-1");
+  const regeneratedScreenshotMerge = mergeScreenshotDraftStep(
+    secondScreenshotMerge,
+    regeneratedSecondScreenshotStep,
+    "screen-2",
+    secondScreenshotStep.id,
+    "screen-2",
+  );
+  assertCheck(
+    "screenshot imports append new screenshots and regenerate same screenshot in place",
+    firstScreenshotMerge.length === 1 &&
+      firstScreenshotMerge[0]?.id === "first-screenshot" &&
+      secondScreenshotMerge.length === 2 &&
+      secondScreenshotMerge[0]?.id === "first-screenshot" &&
+      secondScreenshotMerge[1]?.id === "second-screenshot" &&
+      regeneratedScreenshotMerge.length === 2 &&
+      regeneratedScreenshotMerge[0]?.id === "first-screenshot" &&
+      regeneratedScreenshotMerge[1]?.id === "second-screenshot-regenerated",
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
