@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-full-page-radio-cleanup";
+const APP_VERSION = "20260601-misplaced-choice-repair";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -662,6 +662,11 @@ function inferQuestionForChoiceValue(value) {
   return KNOWN_CHOICE_QUESTION_BY_VALUE.find((item) => item.pattern.test(cleanValue))?.question || "";
 }
 
+function cleanKnownChoiceValue(value) {
+  const cleanValue = cleanChoiceOptionValue(value);
+  return inferQuestionForChoiceValue(cleanValue) ? cleanValue : "";
+}
+
 function isScreenTitleQuestionLabel(question) {
   const cleanQuestion = cleanOcrLabel(question);
   return Boolean(cleanQuestion) && !isLikelyQuestionLabel(cleanQuestion) && !isLikelyFieldLabel(cleanQuestion) && !isChoiceFieldLabel(cleanQuestion);
@@ -673,7 +678,22 @@ function normalizeDraftStepPairs(stepLines, questionLines) {
 
   (stepLines || []).forEach((step, index) => {
     const question = (questionLines || [])[index] || "";
+    const questionChoiceValue = cleanKnownChoiceValue(question);
     const selectedValues = getQuotedValues(step);
+    const knownSelectedValues = uniqueValues([questionChoiceValue, ...selectedValues.map(cleanKnownChoiceValue)].filter(Boolean));
+    const shouldRepairMisplacedKnownChoices =
+      knownSelectedValues.length &&
+      (isScreenTitleQuestionLabel(question) || isMalformedChoiceQuestionLabel(question) || Boolean(questionChoiceValue)) &&
+      (/^select\b/i.test(String(step || "")) || isVisibleFieldDraftStep(step));
+
+    if (shouldRepairMisplacedKnownChoices) {
+      knownSelectedValues.forEach((value) => {
+        steps.push(`select "${value}"`);
+        questions.push(inferQuestionForChoiceValue(value));
+      });
+      return;
+    }
+
     const shouldSplitInferredChoices =
       /^select multiple\s+/i.test(String(step || "")) &&
       selectedValues.length > 1 &&
@@ -705,6 +725,13 @@ function normalizeDraftStepPairs(stepLines, questionLines) {
     if (/^assignee\b/i.test(String(step || "").trim()) && isStandaloneUserPickerLine(question)) {
       steps.push(step);
       questions.push("Add watchers (if any)");
+      return;
+    }
+
+    const visibleChoiceValue = cleanKnownChoiceValue(question);
+    if (visibleChoiceValue && /^(verify|form|question)\b/i.test(String(step || "").trim())) {
+      steps.push(`select "${visibleChoiceValue}"`);
+      questions.push(inferQuestionForChoiceValue(visibleChoiceValue));
       return;
     }
 
@@ -4588,6 +4615,28 @@ function runSelfTests() {
       repairedFullPageBadRows[3]?.Steps === 'For the "Upload additional documents (if any)", upload a valid document.' &&
       repairedFullPageBadRows[4]?.Steps === 'Open the "Add watchers (if any)" assignee field and select the applicable user.' &&
       !repairedFullPageBadRows.some((row) => /Procurement Intake Process.*select|OQ ves|saectuser|Click to Upload/i.test(row.Steps)),
+  );
+
+  const repairedMisplacedChoiceRows = buildRowsForFormat(
+    [
+      {
+        ...createStep(5),
+        details: joinLines(['select multiple "Sales Opportunity" "OQ ves (No"', "form verify visible on screen", "document", "assignee"]),
+        questionLabel: joinLines(["© Single Customer", "© New Purchase", "& Click to Upload or drag and drop", "(3 saectuser 8"]),
+      },
+    ],
+    "each-step",
+  );
+  assertCheck(
+    "preview repairs selected options that landed in question column",
+    repairedMisplacedChoiceRows[0]?.Steps ===
+      'For the question "Type of engagement supported/ will be supported by the Supplier", select "Single Customer".' &&
+      repairedMisplacedChoiceRows[1]?.Steps ===
+        'For the question "Is this request for a sales opportunity or delivery fulfillment", select "Sales Opportunity".' &&
+      repairedMisplacedChoiceRows[2]?.Steps === 'For the question "Request type", select "New Purchase".' &&
+      repairedMisplacedChoiceRows[3]?.Steps === 'For the "Upload additional documents (if any)", upload a valid document.' &&
+      repairedMisplacedChoiceRows[4]?.Steps === 'Open the "Add watchers (if any)" assignee field and select the applicable user.' &&
+      !repairedMisplacedChoiceRows.some((row) => /©|OQ ves|saectuser|New Purchase form|Click to Upload/i.test(row.Steps)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
