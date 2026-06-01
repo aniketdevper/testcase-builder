@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-ocr-value-cleanup";
+const APP_VERSION = "20260601-summary-page-parser";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -205,6 +205,13 @@ function generateExpectedResult(stepText) {
   if (lower.includes("review page")) return "The review page should be displayed with the entered details.";
   if (lower.includes("progress section") || lower.includes("under the progress")) return "The submitted task should be visible under the Progress section.";
   if (lower.includes("assigned to") || lower.includes("assignment")) return "The task assignment should be displayed successfully.";
+  if (lower.includes("final submission summary page")) return "The final submission summary page should be displayed successfully.";
+  if (lower.includes("summary section displays")) {
+    return "The Summary section should display the request title, type of engagement, request type, opportunity ID, and process details correctly.";
+  }
+  if (lower.includes("process details") && lower.includes("estimated duration")) {
+    return "The Process details section should display the estimated duration and process steps correctly.";
+  }
   if (lower.includes("field displays") || lower.includes("field shows")) return "The field should display the expected value.";
   if (lower.includes("informational message")) return "The informational message should be displayed successfully.";
   if (
@@ -261,6 +268,9 @@ function generateActualResult(expectedResult) {
     .replace(/^The review page should be/i, "The review page was")
     .replace(/^The submitted task should be/i, "The submitted task was")
     .replace(/^The task assignment should be/i, "The task assignment was")
+    .replace(/^The final submission summary page should be/i, "The final submission summary page was")
+    .replace(/^The Summary section should be/i, "The Summary section was")
+    .replace(/^The Process details section should be/i, "The Process details section was")
     .replace(/^The field should display/i, "The field displayed")
     .replace(/^The informational message should be/i, "The informational message was")
     .replace(/^The supplier details should be/i, "The supplier details were")
@@ -892,6 +902,21 @@ function cleanOpportunityNumberValue(value) {
     .replace(/^SCC-/i, "SOC-")
     .replace(/\s+/g, "")
     .replace(/[^\w-]/g, "");
+}
+
+function cleanSummaryFieldValue(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/^[=:]\s*/, "")
+    .replace(/\s+[|]\s*$/g, "")
+    .trim();
+}
+
+function cleanProcessStepName(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/^\d+\s+/, "")
+    .replace(/\s*(?:[+~^˄˅⌃⌄]|[vV])\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function cleanOcrOptionValue(value) {
@@ -1903,6 +1928,120 @@ function extractKnownProcurementStepsFromScreenshotText(text) {
   };
 }
 
+function getSummaryValueAfterLabel(lines, labelPattern, stopPatterns = []) {
+  const labelIndex = lines.findIndex((line) => labelPattern.test(cleanOcrLabel(line)));
+  if (labelIndex < 0) return "";
+
+  const inlineLine = cleanOcrDisplayValue(lines[labelIndex]);
+  const inlineText = inlineLine.replace(labelPattern, "").trim();
+  if (inlineText && inlineText !== inlineLine) return cleanSummaryFieldValue(inlineText);
+
+  for (let index = labelIndex + 1; index < lines.length; index += 1) {
+    const cleanLine = cleanOcrDisplayValue(lines[index]);
+    const cleanLabel = cleanOcrLabel(lines[index]);
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (stopPatterns.some((pattern) => pattern.test(cleanLabel))) break;
+    if (isButtonLikeText(cleanLine)) break;
+    return cleanSummaryFieldValue(cleanLine);
+  }
+  return "";
+}
+
+function getSummaryValueFromJoined(joinedText, label, nextLabels) {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  const stopPattern = nextLabels
+    .map((nextLabel) => nextLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"))
+    .join("|");
+  const match = joinedText.match(new RegExp(`${escapedLabel}\\s+(.+?)(?=\\s+(?:${stopPattern})\\b|$)`, "i"));
+  return match ? cleanSummaryFieldValue(match[1]) : "";
+}
+
+function getSummaryProcessStepNames(lines) {
+  const processIndex = lines.findIndex((line) => /process details/i.test(cleanOcrLabel(line)));
+  if (processIndex < 0) return [];
+
+  const names = [];
+  for (let index = processIndex + 1; index < lines.length; index += 1) {
+    const cleanLine = cleanOcrDisplayValue(lines[index]);
+    const cleanLabel = cleanOcrLabel(lines[index]);
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (/^(show all process steps|back|submit)$/i.test(cleanLabel) || isButtonLikeText(cleanLine)) break;
+    if (/estimated duration/i.test(cleanLabel)) continue;
+    if (/\b\d+\s*[-–—]\s*\d+\s+days\b/i.test(cleanLine)) continue;
+    if (/all steps will be executed/i.test(cleanLine)) continue;
+    if (/^\d+$/.test(cleanLine)) continue;
+
+    const stepName = cleanProcessStepName(cleanLine);
+    if (!stepName || stepName.split(/\s+/).length > 8) continue;
+    names.push(stepName);
+  }
+
+  return uniqueValues(names).slice(0, 4);
+}
+
+function parseSubmissionSummaryPage(lines) {
+  const cleanLines = (lines || []).map((line) => cleanOcrDisplayValue(line)).filter(Boolean);
+  const joinedText = cleanLines.join(" ");
+  const hasSummarySignals =
+    /request title/i.test(joinedText) &&
+    /opportunity number/i.test(joinedText) &&
+    (/process details/i.test(joinedText) || /estimated duration/i.test(joinedText) || /\bsubmit\b/i.test(joinedText));
+
+  if (!hasSummarySignals) return { steps: [], questions: [] };
+
+  const labels = ["Purpose of the Request", "Type of engagement", "Request Type", "Opportunity Number", "SLA timeframes", "Process details"];
+  const requestTitle =
+    getSummaryValueAfterLabel(cleanLines, /^request title\b/i, [/purpose of the request/i, /type of engagement/i]) ||
+    getSummaryValueFromJoined(joinedText, "Request Title", labels);
+  const purpose =
+    getSummaryValueAfterLabel(cleanLines, /^purpose of the request\b/i, [/type of engagement/i, /^request type$/i, /opportunity number/i]) ||
+    getSummaryValueFromJoined(joinedText, "Purpose of the Request", ["Type of engagement", "Request Type", "Opportunity Number"]);
+  const engagement =
+    getSummaryValueAfterLabel(cleanLines, /^type of engagement\b/i, [/^request type$/i, /opportunity number/i]) ||
+    getSummaryValueFromJoined(joinedText, "Type of engagement", ["Request Type", "Opportunity Number"]);
+  const requestType =
+    getSummaryValueAfterLabel(cleanLines, /^request type\b/i, [/opportunity number/i, /sla timeframes/i, /process details/i]) ||
+    getSummaryValueFromJoined(joinedText, "Request Type", ["Opportunity Number", "SLA timeframes", "Process details"]);
+  const opportunity =
+    cleanOpportunityNumberValue(
+      getSummaryValueAfterLabel(cleanLines, /^opportunity number\b/i, [/sla timeframes/i, /process details/i]) ||
+        getSummaryValueFromJoined(joinedText, "Opportunity Number", ["SLA timeframes", "Process details"]),
+    );
+
+  const durationMatch = joinedText.match(/\b(?:estimated duration to complete the process\s*)?(\d+\s*[-–—]\s*\d+\s+days)\b/i);
+  const duration = durationMatch ? cleanSummaryFieldValue(durationMatch[1].replace(/\s*[-–—]\s*/g, "-")) : "";
+  const processStepNames = getSummaryProcessStepNames(cleanLines);
+
+  const steps = ["Observe the final submission summary page."];
+  const questions = [""];
+  const summaryParts = [
+    requestTitle ? `Request Title "${requestTitle}"` : "",
+    purpose ? `Purpose of the Request "${purpose}"` : "",
+    engagement ? `Type of Engagement "${engagement}"` : "",
+    requestType ? `Request Type "${requestType}"` : "",
+    opportunity ? `Opportunity Number "${opportunity}"` : "",
+  ].filter(Boolean);
+
+  if (summaryParts.length) {
+    steps.push(`Verify that the Summary section displays ${summaryParts.join(", ").replace(/, ([^,]*)$/, ", and $1")}.`);
+    questions.push("");
+  }
+
+  if (duration || processStepNames.length) {
+    const processParts = [
+      duration ? `estimated duration "${duration}"` : "",
+      processStepNames.length ? `process steps ${processStepNames.map((item) => `"${item}"`).join(" and ")}` : "",
+    ].filter(Boolean);
+    steps.push(`Verify that Process details displays ${processParts.join(" and ")}.`);
+    questions.push("");
+  }
+
+  steps.push("button Submit");
+  questions.push("");
+
+  return { steps, questions };
+}
+
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   const rawLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
@@ -1915,6 +2054,8 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       questions: [""],
     };
   }
+  const submissionSummaryDraft = parseSubmissionSummaryPage(rawLines);
+  if (submissionSummaryDraft.steps.length) return submissionSummaryDraft;
 
   const generated = [];
   let pendingLabel = "";
@@ -3855,12 +3996,14 @@ async function detectVisualContinueButtonFromScreenshotPreview() {
   return hasVisualContinueButtonInImageData(context.getImageData(0, 0, canvas.width, canvas.height));
 }
 
-function applyVisualActionFallbacks(parsed, hasVisualContinueButton) {
+function applyVisualActionFallbacks(parsed, hasVisualContinueButton, sourceText = "") {
   const steps = [...(parsed.steps || [])];
   const questions = [...(parsed.questions || [])];
+  const hasAnyActionButton = steps.some((step) => /\b(button|click)\b.*\b(continue|submit)\b|\b(continue|submit)\b.*\bbutton\b/i.test(step));
+  const actionLabel = /\bsubmit\b/i.test(sourceText) ? "Submit" : "Continue";
 
-  if (steps.length && hasVisualContinueButton && !steps.some((step) => /\b(button|click)\b.*\bcontinue\b|\bcontinue\b.*\bbutton\b/i.test(step))) {
-    steps.push("button Continue");
+  if (steps.length && hasVisualContinueButton && !hasAnyActionButton) {
+    steps.push(`button ${actionLabel}`);
     questions.push("");
   }
 
@@ -3950,7 +4093,7 @@ async function generateFromScreenshotImport() {
     return;
   }
 
-  const parsed = applyVisualActionFallbacks(textParsed, state.screenshotHasVisualContinueButton);
+  const parsed = applyVisualActionFallbacks(textParsed, state.screenshotHasVisualContinueButton, state.screenshotText);
   state.screenshotDebug = buildScreenshotParserDebug(parsed, state.screenshotText);
   const step = createStep(getNextTestCaseIndex(state.steps), state.moduleName, state.scenarioName, state.selectedColumns);
   step.source = "screenshot-import";
@@ -5304,6 +5447,51 @@ function runSelfTests() {
       dirtyEnhancedOcrRows.some((row) => row.Steps === 'Enter "$ 2,822,123.74 CAD" in the "Estimated project amount" field.') &&
       dirtyEnhancedOcrRows.some((row) => row.Steps === 'Enter "SOC-UYGMTPR" in the "Opportunity Number" field.') &&
       !dirtyEnhancedOcrRows.some((row) => /Process B|Details A|Requirements A|Jun 11,2026|S\$|SCC-|form or information|Additional instructions/.test(row.Steps)),
+  );
+
+  const submissionSummaryDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Request Title",
+      "Cisco Hardware for SecNet Program",
+      "Purpose of the Request",
+      "Full Buying process (Purchase Transaction)",
+      "Type of engagement",
+      "Single Customer",
+      "Request Type",
+      "New Purchase",
+      "Opportunity Number",
+      "SOC-UYGMTPR",
+      "SLA timeframes indicate expected completion windows for each step and the overall process. Timelines may adjust",
+      "as the request progresses, increasing or decreasing based on inputs and complexity. Process owners are",
+      "responsible for delivering within defined SLAs, and performance is tracked against these commitments.",
+      "Process details",
+      "Estimated duration to complete the process",
+      "1-120 days",
+      "Pre-approvals prior Procurement Reviews",
+      "All steps will be executed in parallel",
+      "Special Handling",
+      "All steps will be executed in parallel",
+      "Show all process steps",
+      "Back",
+    ]),
+  );
+  const submissionSummaryRows = buildRowsForFormat(
+    [{ ...createStep(3), details: joinLines(submissionSummaryDraft.steps), questionLabel: joinLines(submissionSummaryDraft.questions) }],
+    "each-step",
+  );
+  assertCheck(
+    "submission summary screenshot follows csv-style review steps",
+    submissionSummaryRows.length === 4 &&
+      submissionSummaryRows[0]?.Steps === "Observe the final submission summary page." &&
+      /Request Title "Cisco Hardware for SecNet Program"/.test(submissionSummaryRows[1]?.Steps || "") &&
+      /Type of Engagement "Single Customer"/.test(submissionSummaryRows[1]?.Steps || "") &&
+      /Request Type "New Purchase"/.test(submissionSummaryRows[1]?.Steps || "") &&
+      /Opportunity Number "SOC-UYGMTPR"/.test(submissionSummaryRows[1]?.Steps || "") &&
+      /estimated duration "1-120 days"/.test(submissionSummaryRows[2]?.Steps || "") &&
+      /Pre-approvals prior Procurement Reviews/.test(submissionSummaryRows[2]?.Steps || "") &&
+      /Special Handling/.test(submissionSummaryRows[2]?.Steps || "") &&
+      submissionSummaryRows[3]?.Steps === 'Click the "Submit" button.' &&
+      !submissionSummaryRows.some((row) => /SLA timeframes|responsible for delivering|form or information|Enter "Full Buying/.test(row.Steps)),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
