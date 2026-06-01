@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-ordered-ocr-fields";
+const APP_VERSION = "20260601-parser-debug";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -96,6 +96,7 @@ const state = {
   screenshotPreview: "",
   screenshotText: "",
   screenshotStatus: "",
+  screenshotDebug: "",
   screenshotVisualRadioGroups: [],
   screenshotHasVisualContinueButton: false,
   lastScreenshotStepId: null,
@@ -748,7 +749,7 @@ function normalizeDraftStepPairs(stepLines, questionLines) {
     questions[index + 1] = mergedNextQuestion.label;
   }
 
-  return { steps, questions };
+  return orderKnownDraftStepPairs(steps, questions);
 }
 
 function isButtonLikeText(line) {
@@ -1647,10 +1648,49 @@ function getParsedItemRank(item, fallbackIndex) {
   return KNOWN_PARSED_ITEM_ORDER.has(key) ? KNOWN_PARSED_ITEM_ORDER.get(key) : 1000 + fallbackIndex;
 }
 
+function orderKnownDraftStepPairs(steps, questions) {
+  const items = (steps || []).map((step, index) => ({
+    step,
+    question: (questions || [])[index] || "",
+    order: index,
+  }));
+  if (!items.some((item) => KNOWN_PARSED_ITEM_ORDER.has(getParsedItemKey(item.step, item.question)))) {
+    return { steps, questions };
+  }
+
+  items.sort((a, b) => getParsedItemRank(a, a.order) - getParsedItemRank(b, b.order));
+  return {
+    steps: items.map((item) => item.step),
+    questions: items.map((item) => item.question),
+  };
+}
+
 function isEmptyOptionalParsedField(item) {
   const cleanStep = cleanOcrLabel(item.step).toLowerCase();
   const cleanQuestion = cleanOcrLabel(item.question).toLowerCase();
   return cleanStep === "field verify visible on screen" && /additional instructions|comments?|notes?/i.test(cleanQuestion);
+}
+
+function buildScreenshotParserDebug(parsed, sourceText) {
+  const keys = new Set((parsed.steps || []).map((step, index) => getParsedItemKey(step, (parsed.questions || [])[index] || "")));
+  const requiredLabels = [
+    ["Target Date", "field:target date"],
+    ["Estimated amount", "field:estimated project amount"],
+    ["Cost Case", "question:cost case"],
+    ["Opportunity Number", "field:opportunity number"],
+    ["Request Type", "question:request type"],
+    ["Capital Expenditure", "question:capital expenditure"],
+    ["Reusable Assets", "question:reusable assets"],
+    ["Quotation", "question:quotation"],
+    ["Upload", "field:upload additional documents"],
+    ["Watchers", "field:add watchers"],
+  ];
+  const found = requiredLabels.filter(([, key]) => keys.has(key)).map(([label]) => label);
+  const missing = requiredLabels.filter(([, key]) => !keys.has(key)).map(([label]) => label);
+  const ocrLineCount = splitLines(sourceText).length;
+  return `Parser ${APP_VERSION}. OCR lines: ${ocrLineCount}. Steps: ${(parsed.steps || []).length}. Found: ${found.join(", ") || "none"}. Missing: ${
+    missing.join(", ") || "none"
+  }.`;
 }
 
 function mergeParsedScreenshotSteps(primary, fallback) {
@@ -2973,6 +3013,7 @@ function renderScreenshotImporter() {
             <textarea data-bind="screenshotText" class="input screenshot-text" placeholder="Paste OCR text from the screenshot here">${escapeHtml(state.screenshotText)}</textarea>
           </label>
         </div>
+        ${state.screenshotDebug ? `<div class="form-message">${escapeHtml(state.screenshotDebug)}</div>` : ""}
         ${
           state.screenshotPreview
             ? `<figure class="screenshot-preview"><img src="${attr(state.screenshotPreview)}" alt="${attr(
@@ -3694,9 +3735,11 @@ function formatTimestamp(seconds) {
           state.screenshotVisualRadioGroups.length ? `Detected ${state.screenshotVisualRadioGroups.length} selected option group(s). ` : ""
         }${state.screenshotHasVisualContinueButton ? "Detected Continue button. " : ""}Review and generate steps.`
       : "No text detected. Paste screen text and generate steps.";
+    state.screenshotDebug = extractedText ? `Parser ${APP_VERSION}. OCR lines: ${splitLines(extractedText).length}. Generate steps to see found/missing fields.` : "";
   } catch (error) {
     console.warn("Screenshot OCR unavailable", error);
     state.screenshotStatus = "Automatic OCR is unavailable here. Paste screen text and generate steps.";
+    state.screenshotDebug = "";
   }
 
   renderApp();
@@ -3735,6 +3778,7 @@ async function generateFromScreenshotImport() {
   }
 
   const parsed = applyVisualActionFallbacks(textParsed, state.screenshotHasVisualContinueButton);
+  state.screenshotDebug = buildScreenshotParserDebug(parsed, state.screenshotText);
   const step = createStep(getNextTestCaseIndex(state.steps), state.moduleName, state.scenarioName, state.selectedColumns);
   step.source = "screenshot-import";
   step.details = joinLines(parsed.steps);
@@ -3757,7 +3801,7 @@ async function generateFromScreenshotImport() {
     state.steps = [...state.steps.filter((item) => !isContinueOnlyScreenshotDraft(item)), step];
   }
   state.lastScreenshotStepId = step.id;
-  state.screenshotStatus = `Generated ${parsed.steps.length} draft step${parsed.steps.length === 1 ? "" : "s"}.`;
+  state.screenshotStatus = `Generated ${parsed.steps.length} draft step${parsed.steps.length === 1 ? "" : "s"} with parser ${APP_VERSION}.`;
   renderApp();
 }
 
@@ -3766,6 +3810,7 @@ function clearScreenshotImport() {
   state.screenshotPreview = "";
   state.screenshotText = "";
   state.screenshotStatus = "";
+  state.screenshotDebug = "";
   state.screenshotVisualRadioGroups = [];
   state.screenshotHasVisualContinueButton = false;
   state.lastScreenshotStepId = null;
@@ -5000,6 +5045,39 @@ function runSelfTests() {
       requestTypeStepIndex >= 0 &&
       uploadStepIndex > requestTypeStepIndex &&
       !enhancedMergedFullPageProcurementSteps.some((step) => /Additional instructions.*visible/i.test(step)),
+  );
+
+  const oldOrderedScreenshotRows = buildRowsForFormat(
+    [
+      {
+        ...createStep(1),
+        details: joinLines([
+          "form verify visible on screen",
+          "document",
+          "assignee",
+          'select "Single Customer"',
+          'select "Sales Opportunity"',
+          'select "New Purchase"',
+        ]),
+        questionLabel: joinLines([
+          "Procurement Intake Process",
+          "Upload additional documents (if any)",
+          "Add watchers (if any)",
+          "Type of engagement supported/ will be supported by the Supplier",
+          "Is this request for a sales opportunity or delivery fulfillment",
+          "Request type",
+        ]),
+      },
+    ],
+    "each-step",
+  );
+  assertCheck(
+    "known screenshot fields are ordered in preview even from older rows",
+    oldOrderedScreenshotRows[1]?.Steps.includes("Type of engagement supported") &&
+      oldOrderedScreenshotRows[2]?.Steps.includes("sales opportunity or delivery fulfillment") &&
+      oldOrderedScreenshotRows[3]?.Steps.includes("Request type") &&
+      oldOrderedScreenshotRows[4]?.Steps.includes("Upload additional documents") &&
+      oldOrderedScreenshotRows[5]?.Steps.includes("Add watchers"),
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
