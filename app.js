@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260602-generic-dashboard-tile";
+const APP_VERSION = "20260602-dashboard-tile-ocr-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -1058,8 +1058,15 @@ function isBrowserChromeOcrLine(line) {
   return false;
 }
 
+function cleanDashboardTileCandidate(line) {
+  return cleanOcrLabel(line)
+    .replace(/\s+(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))*\s*$/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function isDashboardTileCandidate(line) {
-  const cleanLine = cleanOcrLabel(line);
+  const cleanLine = cleanDashboardTileCandidate(line);
   if (!cleanLine || cleanLine.length > 70) return false;
   if (isButtonLikeText(cleanLine) || isBrowserChromeOcrLine(cleanLine) || isLikelyOcrNoiseLine(cleanLine)) return false;
   if (/^(start new|see all|my requests|home|tasks|requests|suppliers|more|ask procure ai|front door|priority|requester)$/i.test(cleanLine)) return false;
@@ -1083,7 +1090,8 @@ function getDashboardTileLabel(lines) {
   const startIndex = cleanLines.findIndex((line) => /\bstart new\b/i.test(line));
   const endIndex = cleanLines.findIndex((line, index) => index > startIndex && /\bmy requests\b/i.test(line));
   const tileZone = cleanLines.slice(Math.max(0, startIndex + 1), endIndex > startIndex ? endIndex : cleanLines.length);
-  return tileZone.find(isDashboardTileCandidate) || "";
+  const tileLine = tileZone.find(isDashboardTileCandidate) || "";
+  return cleanDashboardTileCandidate(tileLine);
 }
 
 function isLikelyQuestionLabel(line) {
@@ -4949,6 +4957,31 @@ function runSelfTests() {
     aniTechDashboardDraft.steps.length === 1 &&
       aniTechDashboardDraft.steps[0] === "tile Procurement Intake ANI" &&
       localEnhanceStep(aniTechDashboardDraft.steps[0]) === 'Click on the "Procurement Intake ANI" tile from the dashboard.',
+  );
+
+  const noisyAniTechDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "ERAniTech Home Tasks Requests Suppliers More Vv @W 9 AO oa",
+      "_",
+      "q @ Upload Offer >)",
+      "Start New See All >",
+      "Procurement Intake ANI v Tn v Tn v Tn",
+      "This is the Start of Procurement Intake )",
+      "ANI Supplier Onboarding Risk Review AI Agent TestAgent PR",
+      "My Requests See all requests >",
+      "ORO-618",
+      "Risk Review AI Agent",
+      "ANI AI Agent",
+      "Priority",
+      "Requester",
+      "Oro Admin (harshit.raj@...",
+    ]),
+  );
+  assertCheck(
+    "dashboard tile OCR junk is cleaned before parsing",
+    noisyAniTechDashboardDraft.steps.length === 1 &&
+      noisyAniTechDashboardDraft.steps[0] === "tile Procurement Intake ANI" &&
+      localEnhanceStep(noisyAniTechDashboardDraft.steps[0]) === 'Click on the "Procurement Intake ANI" tile from the dashboard.',
   );
 
   const visualRadioDraft = generateStepsFromScreenshotText(
