@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-cumulative-screenshot-import";
+const APP_VERSION = "20260601-combined-screenshot-flow-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -271,7 +271,9 @@ function generateActualResult(expectedResult) {
     .replace(/^The submitted task should be/i, "The submitted task was")
     .replace(/^The task assignment should be/i, "The task assignment was")
     .replace(/^The final submission summary page should be/i, "The final submission summary page was")
+    .replace(/^The Summary section should display/i, "The Summary section displayed")
     .replace(/^The Summary section should be/i, "The Summary section was")
+    .replace(/^The Process details section should display/i, "The Process details section displayed")
     .replace(/^The Process details section should be/i, "The Process details section was")
     .replace(/^The field should display/i, "The field displayed")
     .replace(/^The informational message should be/i, "The informational message was")
@@ -657,6 +659,10 @@ function isVisibleFieldDraftStep(step) {
 
 const KNOWN_CHOICE_QUESTION_BY_VALUE = [
   {
+    pattern: /^(full buying process\s*\(purchase transaction\)|indicative budgetary quote|customer bid assistance)$/i,
+    question: "What's the purpose of this request?",
+  },
+  {
     pattern: /^(single customer|multi-customer pool|kyndryl internal use)$/i,
     question: "Type of engagement supported/ will be supported by the Supplier",
   },
@@ -820,6 +826,9 @@ const CHOICE_OPTION_PREFIXES = new Set([
   "corporate card",
   "existing supplier",
   "new supplier onboarding",
+  "indicative budgetary quote",
+  "full buying process (purchase transaction)",
+  "customer bid assistance",
 ]);
 
 function normalizeOcrLine(line) {
@@ -848,6 +857,7 @@ function cleanOcrDisplayValue(value) {
 
 function cleanOcrLabel(value) {
   return cleanOcrDisplayValue(value)
+    .replace(/\s+\d+\s+(?:indicative budgetary quote|full buying process\s*\(purchase transaction\)|customer bid assistance)\s*$/i, "")
     .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
     .replace(/\s*[®©ⓘ]\s*$/g, "")
     .replace(/\s*[~^˄˅⌃⌄]\s*$/g, "")
@@ -910,6 +920,7 @@ function cleanSummaryFieldValue(value) {
   return cleanOcrDisplayValue(value)
     .replace(/^[=:]\s*/, "")
     .replace(/\s+[|]\s*$/g, "")
+    .replace(/\s+\b(?:in|ll|ii|l)\b\s*$/i, "")
     .trim();
 }
 
@@ -1087,7 +1098,7 @@ function isLikelyFieldLabel(line) {
 }
 
 function isChoiceFieldLabel(line) {
-  return /(payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
+  return /(purpose of this request|payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
     String(line || ""),
   );
 }
@@ -1967,7 +1978,7 @@ function getSummaryProcessStepNames(lines) {
     const cleanLine = cleanOcrDisplayValue(lines[index]);
     const cleanLabel = cleanOcrLabel(lines[index]);
     if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
-    if (/^(show all process steps|back|submit)$/i.test(cleanLabel) || isButtonLikeText(cleanLine)) break;
+    if (/show all process steps|(^|\s)(back|submit)($|\s)/i.test(cleanLabel) || isButtonLikeText(cleanLine)) break;
     if (/estimated duration/i.test(cleanLabel)) continue;
     if (/\b\d+\s*[-–—]\s*\d+\s+days\b/i.test(cleanLine)) continue;
     if (/all steps will be executed/i.test(cleanLine)) continue;
@@ -2481,6 +2492,18 @@ function getNextTestCaseIndex(steps) {
   }, 0);
 
   return Math.max(highestExistingIndex + 1, steps.length + 1);
+}
+
+function getScreenshotImportTestCaseId(steps) {
+  const existingScreenshotStep = (steps || []).find((step) => step.source === "screenshot-import" && /^TC-\d+$/i.test(String(step.testCaseId || "")));
+  if (existingScreenshotStep) return existingScreenshotStep.testCaseId;
+
+  if (steps.length === 1 && isBlankEditableStep(steps[0]) && /^TC-\d+$/i.test(String(steps[0].testCaseId || ""))) {
+    return steps[0].testCaseId;
+  }
+
+  const firstEditableStep = (steps || []).find((step) => /^TC-\d+$/i.test(String(step.testCaseId || "")));
+  return firstEditableStep?.testCaseId || `TC-${String(getNextTestCaseIndex(steps)).padStart(3, "0")}`;
 }
 
 function insertStepAt(steps, index, moduleName, scenarioName, selectedColumns) {
@@ -4126,6 +4149,7 @@ async function generateFromScreenshotImport() {
   state.screenshotDebug = buildScreenshotParserDebug(parsed, state.screenshotText);
   const step = createStep(getNextTestCaseIndex(state.steps), state.moduleName, state.scenarioName, state.selectedColumns);
   step.source = "screenshot-import";
+  step.testCaseId = getScreenshotImportTestCaseId(state.steps);
   step.details = joinLines(parsed.steps);
   step.questionLabel = joinLines(parsed.questions);
   state.activeSavedFile = null;
@@ -4969,12 +4993,35 @@ function runSelfTests() {
       ) &&
       enhancedRequestPurposeSteps.includes('For the question "Are you requesting on behalf of someone else?", select "No".') &&
       enhancedRequestPurposeSteps.includes(
-        'For the question "What\'s the purpose of this request?", select "Full Buying process (Purchase Transaction)".',
+        'For the question "What\'s the purpose of this request?", select "Full Buying Process (Purchase Transaction)".',
       ) &&
       enhancedRequestPurposeSteps.includes(
         'Enter "The procurement of Cisco hardware under the SECNET program for the Canada region is required to support Air Canada\'s ongoing network modernization, security enhancement, and multiregion operational readiness initiatives." in the "Describe your need in detail" field.',
       ) &&
       !enhancedRequestPurposeSteps.some((step) => /Indicative Budgetary Quote.*Describe your need|select .*Indicative Budgetary Quote|®/i.test(step)),
+  );
+
+  const noisyRequestPurposeDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Request Details",
+      "What's the purpose of this request? 3 Indicative Budgetary Quote",
+      "Full Buying Process (Purchase Transaction)",
+      "Describe your need in detail",
+      "The procurement of Cisco hardware under the SECNET program for the Canada region is required.",
+    ]),
+  );
+  const enhancedNoisyRequestPurposeSteps = noisyRequestPurposeDraft.steps.map((step, index) =>
+    localEnhanceStep(step, noisyRequestPurposeDraft.questions[index]),
+  );
+  assertCheck(
+    "request purpose OCR with merged unselected option is repaired",
+    enhancedNoisyRequestPurposeSteps.includes(
+      'For the question "What\'s the purpose of this request?", select "Full Buying Process (Purchase Transaction)".',
+    ) &&
+      enhancedNoisyRequestPurposeSteps.includes(
+        'Enter "The procurement of Cisco hardware under the SECNET program for the Canada region is required." in the "Describe your need in detail" field.',
+      ) &&
+      !enhancedNoisyRequestPurposeSteps.some((step) => /Enter \"Full Buying Process|Indicative Budgetary Quote\" field/i.test(step)),
   );
 
   const regionDropdownDraft = generateStepsFromScreenshotText(
@@ -5470,7 +5517,7 @@ function runSelfTests() {
   const submissionSummaryDraft = generateStepsFromScreenshotText(
     joinLines([
       "Request Title",
-      "Cisco Hardware for SecNet Program",
+      "Cisco Hardware for SecNet Program In",
       "Purpose of the Request",
       "Full Buying process (Purchase Transaction)",
       "Type of engagement",
@@ -5489,8 +5536,8 @@ function runSelfTests() {
       "All steps will be executed in parallel",
       "Special Handling",
       "All steps will be executed in parallel",
-      "Show all process steps",
-      "Back",
+      "Vv Show all process steps",
+      "Back Submit",
     ]),
   );
   const submissionSummaryRows = buildRowsForFormat(
@@ -5509,7 +5556,9 @@ function runSelfTests() {
       /Pre-approvals prior Procurement Reviews/.test(submissionSummaryRows[2]?.Steps || "") &&
       /Special Handling/.test(submissionSummaryRows[2]?.Steps || "") &&
       submissionSummaryRows[3]?.Steps === 'Click the "Submit" button.' &&
-      !submissionSummaryRows.some((row) => /SLA timeframes|responsible for delivering|form or information|Enter "Full Buying/.test(row.Steps)),
+      submissionSummaryRows[1]?.["Actual Result"] ===
+        "The Summary section displayed the request title, type of engagement, request type, opportunity ID, and process details correctly." &&
+      !submissionSummaryRows.some((row) => /SecNet Program In|Show all process steps|Back Submit|SLA timeframes|responsible for delivering|form or information|Enter "Full Buying/.test(row.Steps)),
   );
 
   const blankScreenshotStep = createStep(1);
@@ -5540,6 +5589,11 @@ function runSelfTests() {
       regeneratedScreenshotMerge.length === 2 &&
       regeneratedScreenshotMerge[0]?.id === "first-screenshot" &&
       regeneratedScreenshotMerge[1]?.id === "second-screenshot-regenerated",
+  );
+  assertCheck(
+    "screenshot flow keeps one test case id across imported screenshots",
+    getScreenshotImportTestCaseId([blankScreenshotStep]) === "TC-001" &&
+      getScreenshotImportTestCaseId([{ ...firstScreenshotStep, source: "screenshot-import", testCaseId: "TC-001" }, secondScreenshotStep]) === "TC-001",
   );
 
   const procurementIntakeMissingButtonDraft = applyVisualActionFallbacks(
