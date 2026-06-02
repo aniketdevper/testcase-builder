@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260602-dashboard-tile-ocr-cleanup";
+const APP_VERSION = "20260602-selected-dashboard-tile";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -1065,6 +1065,11 @@ function cleanDashboardTileCandidate(line) {
     .trim();
 }
 
+function hasSelectedDashboardTileSignal(line) {
+  const cleanLine = cleanOcrLabel(line);
+  return /\s(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s*$/i.test(cleanLine);
+}
+
 function isDashboardTileCandidate(line) {
   const cleanLine = cleanDashboardTileCandidate(line);
   if (!cleanLine || cleanLine.length > 70) return false;
@@ -1090,8 +1095,11 @@ function getDashboardTileLabel(lines) {
   const startIndex = cleanLines.findIndex((line) => /\bstart new\b/i.test(line));
   const endIndex = cleanLines.findIndex((line, index) => index > startIndex && /\bmy requests\b/i.test(line));
   const tileZone = cleanLines.slice(Math.max(0, startIndex + 1), endIndex > startIndex ? endIndex : cleanLines.length);
-  const tileLine = tileZone.find(isDashboardTileCandidate) || "";
-  return cleanDashboardTileCandidate(tileLine);
+  const tileCandidates = tileZone
+    .map((line) => ({ raw: line, clean: cleanDashboardTileCandidate(line), selected: hasSelectedDashboardTileSignal(line) }))
+    .filter((item) => isDashboardTileCandidate(item.raw));
+  const selectedTile = tileCandidates.find((item) => item.selected);
+  return selectedTile?.clean || tileCandidates[0]?.clean || "";
 }
 
 function isLikelyQuestionLabel(line) {
@@ -4982,6 +4990,26 @@ function runSelfTests() {
     noisyAniTechDashboardDraft.steps.length === 1 &&
       noisyAniTechDashboardDraft.steps[0] === "tile Procurement Intake ANI" &&
       localEnhanceStep(noisyAniTechDashboardDraft.steps[0]) === 'Click on the "Procurement Intake ANI" tile from the dashboard.',
+  );
+
+  const selectedSecondDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Home Tasks Requests Suppliers More",
+      "Start New",
+      "Procurement Intake ANI",
+      "This is the Start of Procurement Intake",
+      "ANI Supplier Onboarding v Tn v Tn",
+      "This is a supplier onboarding process",
+      "Risk Review AI Agent",
+      "testing ai agent",
+      "My Requests",
+    ]),
+  );
+  assertCheck(
+    "dashboard selected tile is preferred over first tile",
+    selectedSecondDashboardDraft.steps.length === 1 &&
+      selectedSecondDashboardDraft.steps[0] === "tile ANI Supplier Onboarding" &&
+      localEnhanceStep(selectedSecondDashboardDraft.steps[0]) === 'Click on the "ANI Supplier Onboarding" tile from the dashboard.',
   );
 
   const visualRadioDraft = generateStepsFromScreenshotText(
