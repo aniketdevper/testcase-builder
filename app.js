@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260601-combined-screenshot-flow-cleanup";
+const APP_VERSION = "20260602-generic-dashboard-tile";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -1058,23 +1058,32 @@ function isBrowserChromeOcrLine(line) {
   return false;
 }
 
-const DASHBOARD_TILE_LABELS = [
-  { pattern: /\bprocurement intake process\b/i, label: "Procurement Intake" },
-  { pattern: /\bprocurement intake\b/i, label: "Procurement Intake" },
-  { pattern: /\bcontingent worker request\b/i, label: "Contingent Worker Request" },
-  { pattern: /\bsap ariba catalog redirects?\b/i, label: "SAP Ariba Catalog Redirects" },
-  { pattern: /\bsourcing execution\b/i, label: "Sourcing Execution" },
-];
+function isDashboardTileCandidate(line) {
+  const cleanLine = cleanOcrLabel(line);
+  if (!cleanLine || cleanLine.length > 70) return false;
+  if (isButtonLikeText(cleanLine) || isBrowserChromeOcrLine(cleanLine) || isLikelyOcrNoiseLine(cleanLine)) return false;
+  if (/^(start new|see all|my requests|home|tasks|requests|suppliers|more|ask procure ai|front door|priority|requester)$/i.test(cleanLine)) return false;
+  if (/^(please|this is|process to|request for|procurement intake for|testing|test)\b/i.test(cleanLine)) return false;
+  if (/\b(describe your business needs|upload quote|upload offer|see all requests|started on|assigned to|current step|completion)\b/i.test(cleanLine)) return false;
+  if (/^ORO-\d+/i.test(cleanLine)) return false;
+
+  const words = cleanLine.split(/\s+/).filter(Boolean);
+  if (words.length > 6) return false;
+  return words.some((word) => /^[A-Z0-9][A-Za-z0-9&/-]*$/.test(word));
+}
 
 function getDashboardTileLabel(lines) {
-  const combined = lines.join(" ");
+  const cleanLines = (lines || []).map((line) => cleanOcrLabel(line)).filter(Boolean);
+  const combined = cleanLines.join(" ");
   const hasDashboardSignals =
     /\bstart new\b/i.test(combined) &&
-    (/\bmy requests\b/i.test(combined) || /\bask procure\b/i.test(combined) || /\bsee all\b/i.test(combined) || /\bkyndryl procure\b/i.test(combined));
+    (/\bmy requests\b/i.test(combined) || /\bask procure\b/i.test(combined) || /\bsee all\b/i.test(combined) || /\bhome\s+tasks\s+requests\s+suppliers\b/i.test(combined));
   if (!hasDashboardSignals) return "";
 
-  const match = DASHBOARD_TILE_LABELS.find((tile) => tile.pattern.test(combined));
-  return match?.label || "";
+  const startIndex = cleanLines.findIndex((line) => /\bstart new\b/i.test(line));
+  const endIndex = cleanLines.findIndex((line, index) => index > startIndex && /\bmy requests\b/i.test(line));
+  const tileZone = cleanLines.slice(Math.max(0, startIndex + 1), endIndex > startIndex ? endIndex : cleanLines.length);
+  return tileZone.find(isDashboardTileCandidate) || "";
 }
 
 function isLikelyQuestionLabel(line) {
@@ -4912,8 +4921,34 @@ function runSelfTests() {
   assertCheck(
     "dashboard screenshot ignores browser chrome and creates tile step",
     kyndrylDashboardDraft.steps.length === 1 &&
-      kyndrylDashboardDraft.steps[0] === "tile Procurement Intake" &&
-      localEnhanceStep(kyndrylDashboardDraft.steps[0]) === 'Click on the "Procurement Intake" tile from the dashboard.',
+      kyndrylDashboardDraft.steps[0] === "tile Procurement Intake Process" &&
+      localEnhanceStep(kyndrylDashboardDraft.steps[0]) === 'Click on the "Procurement Intake Process" tile from the dashboard.',
+  );
+
+  const aniTechDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "AniTech Private Limited",
+      "Home Tasks Requests Suppliers More",
+      "Please describe your business needs...",
+      "Upload Offer",
+      "Start New",
+      "Procurement Intake ANI",
+      "This is the Start of Procurement Intake",
+      "Start New",
+      "ANI Supplier Onboarding",
+      "This is a supplier onboarding process",
+      "Risk Review AI Agent",
+      "testing ai agent",
+      "TestAgent PR",
+      "test",
+      "My Requests",
+    ]),
+  );
+  assertCheck(
+    "dashboard tile name is read from selected card",
+    aniTechDashboardDraft.steps.length === 1 &&
+      aniTechDashboardDraft.steps[0] === "tile Procurement Intake ANI" &&
+      localEnhanceStep(aniTechDashboardDraft.steps[0]) === 'Click on the "Procurement Intake ANI" tile from the dashboard.',
   );
 
   const visualRadioDraft = generateStepsFromScreenshotText(
