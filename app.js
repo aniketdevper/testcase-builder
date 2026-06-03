@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260603-screenshot-order-cleanup";
+const APP_VERSION = "20260603-pepco-parser-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -228,7 +228,7 @@ function generateExpectedResult(stepText) {
   if (lower.includes("login") || lower.includes("log in")) return "The user should be logged into the application successfully.";
   if (lower.includes("logout")) return "The user should be logged out successfully.";
   if (lower.includes("upload a valid document")) return "The valid document should be uploaded successfully.";
-  if (lower.includes("document") && lower.includes("select")) return "The required document should be selected successfully.";
+  if (/\bdocuments?\b/.test(lower) && lower.includes("select")) return "The required document should be selected successfully.";
   if (lower.includes("assignee")) return "The selected assignee should be applied successfully.";
   if (lower.includes("select") && lower.includes("dropdown field")) return "The selected dropdown value should be applied successfully.";
   if (lower.includes("dropdown")) return "The dropdown options should be available successfully.";
@@ -855,6 +855,13 @@ function cleanOcrDisplayValue(value) {
     .trim();
 }
 
+function cleanAutoPopulatedFieldValue(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/\s+\b(?:ww|w|x|v)\b\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function cleanOcrLabel(value) {
   return cleanOcrDisplayValue(value)
     .replace(/\s+\d+\s+(?:indicative budgetary quote|full buying process\s*\(purchase transaction\)|customer bid assistance)\s*$/i, "")
@@ -872,9 +879,23 @@ function cleanOcrLabel(value) {
 
 function cleanDateDisplayValue(value) {
   const clean = cleanOcrDisplayValue(value).replace(/\s+[@©®?\]]+$/g, "").trim();
-  const match = clean.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\s*,?\s*(\d{4})\b/i);
-  if (!match) return clean;
-  return `${titleCase(match[1])} ${Number(match[2])}, ${match[3]}`;
+  const matches = [
+    ...clean.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\s*,?\s*(\d{4})\b/gi),
+  ];
+  if (!matches.length) return clean;
+
+  const values = [];
+  const seen = new Set();
+  matches.forEach((match) => {
+    const value = `${titleCase(match[1])} ${Number(match[2])}, ${match[3]}`;
+    const key = value.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      values.push(value);
+    }
+  });
+
+  return values.length > 1 ? `${values[0]} to ${values[1]}` : values[0];
 }
 
 function normalizeCurrencyCode(value) {
@@ -895,7 +916,7 @@ function cleanAmountDisplayValue(value) {
     .replace(/\s+/g, " ")
     .trim();
   const currencyCode = normalizeCurrencyCode(clean);
-  const symbol = /[$€£]/.test(clean) ? "$" : "";
+  const symbol = clean.match(/[$€£₹]/)?.[0] || "";
   const digits = clean.replace(/\D/g, "");
   const hasMalformedGroupedNumber = /\d{1,3},\d{5,}/.test(clean);
   const hasDecimalNumber = /\d+[,.]\d{2}\b/.test(clean);
@@ -927,7 +948,7 @@ function cleanSummaryFieldValue(value) {
 function cleanProcessStepName(value) {
   return cleanOcrDisplayValue(value)
     .replace(/^\d+\s+/, "")
-    .replace(/\s*(?:[+~^˄˅⌃⌄]|[vV])\s*$/g, "")
+    .replace(/\s*(?:[+~^˄˅⌃⌄]|[vV]|[|])\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1071,6 +1092,14 @@ function hasSelectedDashboardTileSignal(line) {
   return /\s(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s*$/i.test(cleanLine);
 }
 
+function isLikelyDashboardTileDescription(line) {
+  const cleanLine = cleanDashboardTileCandidate(line).toLowerCase();
+  if (!cleanLine) return false;
+  return /^(?:intake process(?:\s*\(\d+\))?|this is\b|boarding in oro|testing(?:\s+ai\s+agent)?|test|compute form|procurement intake for|request for|process to)\b/i.test(
+    cleanLine,
+  );
+}
+
 function isDashboardTileCandidate(line) {
   const cleanLine = cleanDashboardTileCandidate(line);
   if (!cleanLine || cleanLine.length > 70) return false;
@@ -1097,10 +1126,19 @@ function getDashboardTileLabel(lines) {
   const endIndex = cleanLines.findIndex((line, index) => index > startIndex && /\bmy requests\b/i.test(line));
   const tileZone = cleanLines.slice(Math.max(0, startIndex + 1), endIndex > startIndex ? endIndex : cleanLines.length);
   const tileCandidates = tileZone
-    .map((line) => ({ raw: line, clean: cleanDashboardTileCandidate(line), selected: hasSelectedDashboardTileSignal(line) }))
+    .map((line, index) => ({ raw: line, clean: cleanDashboardTileCandidate(line), selected: hasSelectedDashboardTileSignal(line), index }))
     .filter((item) => isDashboardTileCandidate(item.raw));
-  const selectedTile = tileCandidates.find((item) => item.selected);
-  return selectedTile?.clean || tileCandidates[0]?.clean || "";
+  const selectedTileIndex = tileCandidates.findIndex((item) => item.selected);
+
+  if (selectedTileIndex >= 0) {
+    const selectedTile = tileCandidates[selectedTileIndex];
+    const previousTitle = [...tileCandidates.slice(0, selectedTileIndex)]
+      .reverse()
+      .find((item) => !isLikelyDashboardTileDescription(item.clean));
+    return isLikelyDashboardTileDescription(selectedTile.clean) && previousTitle ? previousTitle.clean : selectedTile.clean;
+  }
+
+  return tileCandidates.find((item) => !isLikelyDashboardTileDescription(item.clean))?.clean || tileCandidates[0]?.clean || "";
 }
 
 function isLikelyQuestionLabel(line) {
@@ -1118,13 +1156,13 @@ function isTopLevelScreenTitleLine(line, lineIndex) {
 }
 
 function isLikelyFieldLabel(line) {
-  return /(amount|entity|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
+  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|objective|geography|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
     String(line || ""),
   );
 }
 
 function isChoiceFieldLabel(line) {
-  return /(purpose of this request|payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
+  return /(purpose of this request|payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|marketing activity|digital channels|customer personal data|external supplier|third party|supplier access|legal documentation|documentation is required|high-value|long-term financial commitment|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
     String(line || ""),
   );
 }
@@ -1166,11 +1204,12 @@ function cleanSupplierCardName(line) {
   )
     .replace(/\bNon\s*[-–—]?\s*Pif\b.*$/i, "")
     .replace(/\bPif\b.*$/i, "")
+    .replace(/\s+[A-Za-z]\s*=\s*[A-Z][A-Za-z0-9_-]*.*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 
   if (!clean) return "";
-  if (/^(selected supplier|contact|enabled for:?|payment terms|add another supplier|back|continue)$/i.test(clean)) return "";
+  if (/^(selected supplier|contact|enabled for:?|payment terms|status:?|add another supplier|back|continue)$/i.test(clean)) return "";
   if (parseSupplierDetailLine(clean) || /@/.test(clean) || /payment terms/i.test(clean)) return "";
   return clean;
 }
@@ -1213,6 +1252,7 @@ function parseSelectedSupplierCard(lines, startIndex) {
     if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
     if (/^(back|continue)$/i.test(cleanLine)) break;
     if (/^\+?\s*add another supplier$/i.test(cleanLine)) break;
+    if (/^status\b/i.test(cleanLine)) continue;
 
     endIndex = index;
 
@@ -1299,19 +1339,20 @@ function getScreenshotFieldType(label) {
   const lower = String(label || "").toLowerCase();
   if (/^region\b/.test(lower)) return "form";
   if (/assessment needed/.test(lower)) return "question";
+  if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
   if (isSupplierCardLabel(label)) return "supplier";
-  if (/\b(upload|document|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
+  if (isChoiceFieldLabel(label)) return "question";
+  if (/\b(upload|documents?|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
     return "document";
   }
-  if (isChoiceFieldLabel(label)) return "question";
-  if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|entity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
+  if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|department|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
     return "dropdown";
   }
   if (/(assignee|owner|requestor|requester|user|approver|buyer|manager|watchers?)/.test(lower)) return "assignee";
-  if (/(date|deadline|start date|end date)/.test(lower)) return "date";
+  if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (
-    /(name|email|number|amount|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|specification|delivery location|location)/.test(
+    /(name|email|number|amount|budget|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|objective|specification|delivery location|location)/.test(
       lower,
     )
   ) {
@@ -1328,6 +1369,7 @@ function createScreenshotStepForValue(label, value) {
   let cleanValue = cleanOcrDisplayValue(selectedValue || cleanOcrOptionValue(value));
   const fieldType = getScreenshotFieldType(cleanLabel);
 
+  if (/requestor|requester/i.test(cleanLabel)) cleanValue = cleanAutoPopulatedFieldValue(cleanValue);
   if (fieldType === "date") cleanValue = cleanDateDisplayValue(cleanValue);
   if (isAmountLikeFieldLabel(cleanLabel)) cleanValue = cleanAmountDisplayValue(cleanValue);
   if (/opportunity number/i.test(cleanLabel)) cleanValue = cleanOpportunityNumberValue(cleanValue);
@@ -1483,6 +1525,7 @@ function getChoiceOptionItem(line, allowBareOption = false, options = {}) {
     !options.allowFieldLikeBare &&
     !selected &&
     !unselected &&
+    !isKnownChoiceOptionLine(value) &&
     (isLikelyFieldLabel(cleanLine) || getScreenshotFieldType(cleanLine) !== "question")
   ) {
     return null;
@@ -1651,6 +1694,39 @@ function collectLongTextFieldValue(lines, startIndex) {
 
   return {
     value: valueLines.join(" ").replace(/\s+/g, " ").trim(),
+    endIndex,
+  };
+}
+
+function collectDateFieldValue(lines, startIndex) {
+  const valueParts = [];
+  let endIndex = startIndex - 1;
+
+  for (let index = startIndex; index < lines.length && index < startIndex + 5; index += 1) {
+    const line = stripWrappingQuotes(normalizeOcrLine(lines[index]).replace(/[:*]+$/g, "").trim());
+    const cleanLine = cleanOcrDisplayValue(line);
+    const cleanLabel = cleanOcrLabel(line);
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
+    if (/^[-–—|]+$/.test(cleanLine)) {
+      endIndex = index;
+      continue;
+    }
+    if (isButtonLikeText(cleanLine)) break;
+
+    const dateValue = cleanDateDisplayValue(cleanLine);
+    const hasDate = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\s*,?\s*\d{4}\b/i.test(cleanLine);
+    if (hasDate) {
+      valueParts.push(dateValue);
+      endIndex = index;
+      continue;
+    }
+
+    if (valueParts.length && (isLikelyQuestionLabel(cleanLabel) || isLikelyFieldLabel(cleanLabel) || isChoiceFieldLabel(cleanLabel))) break;
+    if (valueParts.length) break;
+  }
+
+  return {
+    value: valueParts.join(" to "),
     endIndex,
   };
 }
@@ -1855,10 +1931,19 @@ function buildScreenshotParserDebug(parsed, sourceText) {
   }.`;
 }
 
+function hasProcessDetailsSummaryItem(items) {
+  return (items || []).some((item) => /process details displays/i.test(String(item.step || "")));
+}
+
+function isProcessDetailsFallbackFormItem(item) {
+  return /^form\s+verify\s+visible/i.test(String(item?.step || "")) && /^process details$/i.test(cleanOcrLabel(item?.question || ""));
+}
+
 function mergeParsedScreenshotSteps(primary, fallback) {
   const primaryItems = (primary.steps || []).map((step, index) => ({ step, question: (primary.questions || [])[index] || "" }));
   const fallbackItems = (fallback.steps || []).map((step, index) => ({ step, question: (fallback.questions || [])[index] || "" }));
   if (!fallbackItems.length) return primary;
+  const primaryHasProcessDetailsSummary = hasProcessDetailsSummaryItem(primaryItems);
 
   const sortableItems = [...primaryItems, ...fallbackItems].filter((item) => !isEmptyOptionalParsedField(item));
   if (!hasSortableKnownParsedContent(sortableItems)) {
@@ -1866,6 +1951,7 @@ function mergeParsedScreenshotSteps(primary, fallback) {
     const seen = new Set();
     [...primaryItems, ...fallbackItems].forEach((item) => {
       if (isEmptyOptionalParsedField(item)) return;
+      if (primaryHasProcessDetailsSummary && isProcessDetailsFallbackFormItem(item)) return;
       const key = getParsedItemKey(item.step, item.question);
       if (seen.has(key)) return;
       seen.add(key);
@@ -1882,6 +1968,7 @@ function mergeParsedScreenshotSteps(primary, fallback) {
   const seen = new Set();
   [...fallbackItems, ...primaryItems].forEach((item, order) => {
     if (isEmptyOptionalParsedField(item)) return;
+    if (primaryHasProcessDetailsSummary && isProcessDetailsFallbackFormItem(item)) return;
     const key = getParsedItemKey(item.step, item.question);
     if (seen.has(key)) return;
     seen.add(key);
@@ -2232,8 +2319,15 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       (nextLineIsStandaloneValue && isLikelyFieldLabel(cleanLine)) ||
       nextLineHasSelectedOption ||
       nextLineIsOptionOnly;
+    const canUseNoisyPendingValue =
+      pendingLabel &&
+      !pendingOptions &&
+      /[A-Za-z0-9]/.test(cleanLine) &&
+      !isButtonLikeText(cleanLine) &&
+      !hasChoiceSelectedOcrMarker(cleanLine) &&
+      !hasUnselectedOcrMarker(cleanLine);
 
-    if (isLikelyOcrNoiseLine(cleanLine)) return;
+    if (isLikelyOcrNoiseLine(cleanLine) && !canUseNoisyPendingValue) return;
 
     if (!pendingLabel && isTopLevelScreenTitleLine(cleanLine, lineIndex)) {
       generated.push({ step: "form verify visible on screen", question: cleanOcrLabel(cleanLine) });
@@ -2438,6 +2532,17 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       pendingOptions = false;
       if (nextCurrencyCode) skipUntilLineIndex = lineIndex + 1;
       return;
+    }
+
+    if (pendingLabel && !pendingOptions && getScreenshotFieldType(pendingLabel) === "date") {
+      const dateFieldValue = collectDateFieldValue(rawLines, lineIndex);
+      if (dateFieldValue.value) {
+        generated.push(createScreenshotStepForValue(pendingLabel, dateFieldValue.value));
+        pendingLabel = "";
+        pendingOptions = false;
+        skipUntilLineIndex = dateFieldValue.endIndex;
+        return;
+      }
     }
 
     if (
@@ -4997,6 +5102,11 @@ function runSelfTests() {
   assertCheck("search and select wording", localEnhanceStep("search and select CS4013", "HACAT") === 'Search for and select "CS4013" in the "HACAT" field.');
   assertCheck("request number wording", localEnhanceStep("request number", "") === "Capture the request number for reference during test execution.");
   assertCheck("auto populated expected result", generateExpectedResult('Verify that the "Company name" field is auto-populated with "TechTest".') === "The field should be auto-populated correctly.");
+  assertCheck(
+    "legal documentation choice uses option expected result",
+    generateExpectedResult('For the question "What type of legal documentation is required for this engagement ?", select "Service Agreement".') ===
+      "The selected option should be applied successfully.",
+  );
 
   const screenshotDraft = generateStepsFromScreenshotText(
     joinLines(["Which Country you belong to", "India", "Subject to Withholding tax?", "No", "Company name", "TechTest", "Continue"]),
@@ -5109,6 +5219,27 @@ function runSelfTests() {
       localEnhanceStep(selectedSecondDashboardDraft.steps[0]) === 'Click on the "ANI Supplier Onboarding" tile from the dashboard.',
   );
 
+  const pepDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Home Tasks Requests Suppliers More",
+      "Ask ORO AI",
+      "Start New",
+      "PEP_Co Intake Process",
+      "Intake Process (1) v Tn",
+      "Start New",
+      "Supplier Onbording",
+      "Procurement Intake Process",
+      "compute form",
+      "My Requests",
+    ]),
+  );
+  assertCheck(
+    "generic dashboard parser prefers selected tile title over description",
+    pepDashboardDraft.steps.length === 1 &&
+      pepDashboardDraft.steps[0] === "tile PEP_Co Intake Process" &&
+      localEnhanceStep(pepDashboardDraft.steps[0]) === 'Click on the "PEP_Co Intake Process" tile from the dashboard.',
+  );
+
   const visualRadioDraft = generateStepsFromScreenshotText(
     joinLines(["First radio question?", "O Yes © No", "Second radio question?", "Yes © No"]),
     [
@@ -5153,6 +5284,42 @@ function runSelfTests() {
       ) &&
       enhancedProcurementIntakeSteps.includes('Click the "Continue" button.') &&
       !enhancedProcurementIntakeSteps.some((step) => /\b(LJ|Vz|customeradmin\+anitech_solutions_dev)/i.test(step)),
+  );
+
+  const pepRequestDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Requester",
+      "Oro Admin (aniket.dabhade@orolabs.ai) Ww",
+      "Are you requesting on behalf of someone else?",
+      "No",
+      "Please provide a brief description of your request",
+      "I want to perform social media campaign",
+      "CompanyEntity",
+      "FreshBite India Pvt Ltd.",
+      "Department",
+      "Digital Marketing",
+      "Cost Center",
+      "PEP_1",
+      "Continue",
+    ]),
+  );
+  const enhancedPepRequestDetailsSteps = pepRequestDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, pepRequestDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "generic request detail fields are paired and OCR suffixes are cleaned",
+    enhancedPepRequestDetailsSteps.includes(
+      'Verify that the "Requester" field is auto-populated with "Oro Admin (aniket.dabhade@orolabs.ai)".',
+    ) &&
+      enhancedPepRequestDetailsSteps.includes('For the question "Are you requesting on behalf of someone else?", select "No".') &&
+      enhancedPepRequestDetailsSteps.includes(
+        'Enter "I want to perform social media campaign" in the "Please provide a brief description of your request" field.',
+      ) &&
+      enhancedPepRequestDetailsSteps.includes('Select "FreshBite India Pvt Ltd." from the "CompanyEntity" dropdown field.') &&
+      enhancedPepRequestDetailsSteps.includes('Select "Digital Marketing" from the "Department" dropdown field.') &&
+      enhancedPepRequestDetailsSteps.includes('Select "PEP_1" from the "Cost Center" dropdown field.') &&
+      enhancedPepRequestDetailsSteps.includes('Click the "Continue" button.') &&
+      !enhancedPepRequestDetailsSteps.some((step) => /\bWw\b|Department form|Cost Center form/i.test(step)),
   );
 
   const requestPurposeDraft = generateStepsFromScreenshotText(
@@ -5263,6 +5430,69 @@ function runSelfTests() {
     ) &&
       enhancedRecommendedCategorySteps.includes('Click the "Continue" button.') &&
       !enhancedRecommendedCategorySteps.some((step) => /Recommended options|432225|HW & MAINTENANCE|Read more|View all options|form or information/i.test(step)),
+  );
+
+  const marketingDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Type of marketing activity ?",
+      "© Digital Campaign",
+      "Event Marketing",
+      "Branding",
+      "Digital Campaign",
+      "Which digital channels will be used?",
+      "© Social Media",
+      "Search Ads",
+      "Influencer",
+      "Campaign objective (Lead generation / Brand awareness / App installs)",
+      "Lead generation",
+      "Target geography",
+      "India",
+      "Campaign start and end date",
+      "Jun 03, 2026",
+      "-",
+      "Jul 22, 2026",
+      "Does this campaign involve customer personal data ?",
+      "O Yes © No",
+      "Continue",
+    ]),
+  );
+  const enhancedMarketingDetailsSteps = marketingDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, marketingDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "generic marketing fields keep choice, text, geography, and date range separate",
+    enhancedMarketingDetailsSteps.includes('For the question "Type of marketing activity ?", select "Digital Campaign".') &&
+      enhancedMarketingDetailsSteps.includes('For the question "Which digital channels will be used?", select "Social Media".') &&
+      enhancedMarketingDetailsSteps.includes(
+        'Enter "Lead generation" in the "Campaign objective (Lead generation / Brand awareness / App installs)" field.',
+      ) &&
+      enhancedMarketingDetailsSteps.includes('Select "India" from the "Target geography" dropdown field.') &&
+      enhancedMarketingDetailsSteps.includes(
+        'Select "Jun 3, 2026 to Jul 22, 2026" in the "Campaign start and end date" date field.',
+      ) &&
+      enhancedMarketingDetailsSteps.includes('For the question "Does this campaign involve customer personal data ?", select "No".') &&
+      enhancedMarketingDetailsSteps.includes('Click the "Continue" button.') &&
+      !enhancedMarketingDetailsSteps.some((step) => /Jun 03.*field|Jul 22.*Jun 03|Campaign objective.*visible/i.test(step)),
+  );
+
+  const budgetFulfillmentDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "What is the estimated total budget for this request?",
+      "₹ 12,312.00 INR",
+      "When do you need this request to be fulfilled?",
+      "Jun 03, 2026",
+      "Continue",
+    ]),
+  );
+  const enhancedBudgetFulfillmentSteps = budgetFulfillmentDraft.steps.map((step, index) =>
+    localEnhanceStep(step, budgetFulfillmentDraft.questions[index]),
+  );
+  assertCheck(
+    "generic budget and fulfillment date fields preserve currency and date type",
+    enhancedBudgetFulfillmentSteps.includes('Enter "₹ 12,312.00 INR" in the "What is the estimated total budget for this request?" field.') &&
+      enhancedBudgetFulfillmentSteps.includes('Select "Jun 3, 2026" in the "When do you need this request to be fulfilled?" date field.') &&
+      enhancedBudgetFulfillmentSteps.includes('Click the "Continue" button.') &&
+      !enhancedBudgetFulfillmentSteps.some((step) => /When do you need.*select|12,312.*visible/i.test(step)),
   );
 
   const engagementDetailsDraft = generateStepsFromScreenshotText(
@@ -5783,6 +6013,28 @@ function runSelfTests() {
       !processDetailsRows.some((row) => /Show all process steps|Assigned to|form or information|Verify that the days/i.test(row.Steps)),
   );
 
+  const mergedProcessDetailsDraft = mergeParsedScreenshotSteps(
+    {
+      steps: ['Verify that Process details displays estimated duration "7 days" and process steps "Procurement Review" and "Department Review".', "button Submit"],
+      questions: ["", ""],
+    },
+    {
+      steps: ["form verify visible on screen"],
+      questions: ["Process details"],
+    },
+  );
+  const mergedProcessDetailsRows = buildRowsForFormat(
+    [{ ...createStep(4), details: joinLines(mergedProcessDetailsDraft.steps), questionLabel: joinLines(mergedProcessDetailsDraft.questions) }],
+    "each-step",
+  );
+  assertCheck(
+    "process details fallback form row is not appended after stronger summary",
+    mergedProcessDetailsRows.length === 2 &&
+      /estimated duration "7 days"/.test(mergedProcessDetailsRows[0]?.Steps || "") &&
+      mergedProcessDetailsRows[1]?.Steps === 'Click the "Submit" button.' &&
+      !mergedProcessDetailsRows.some((row) => /^Verify that "Process details" form/.test(row.Steps)),
+  );
+
   const blankScreenshotStep = createStep(1);
   const firstScreenshotStep = { ...createStep(1), id: "first-screenshot", details: "form verify visible on screen", questionLabel: "First screen" };
   const secondScreenshotStep = { ...createStep(2), id: "second-screenshot", details: "button Continue", questionLabel: "" };
@@ -6040,6 +6292,28 @@ function runSelfTests() {
       enhancedSelectedSupplierDetailsSteps.includes('Select "Net 30 days (B022)" from the "Payment terms" dropdown field.') &&
       enhancedSelectedSupplierDetailsSteps.includes('Click the "Continue" button.') &&
       !enhancedSelectedSupplierDetailsSteps.some((step) => /Non-Pif|Add another supplier|@ Enabled|\"Selected supplier\" form|\"\\+ Add another supplier\"/i.test(step)),
+  );
+
+  const selectedSupplierLogoNoiseDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Selected supplier",
+      "TIM S.p.A. Z=TIM",
+      "Milan, Italy | gruppotim.it",
+      "Select contact",
+      "Status: New Supplier",
+      "+ Add another supplier",
+      "Continue",
+    ]),
+  );
+  const enhancedSelectedSupplierLogoNoiseSteps = selectedSupplierLogoNoiseDraft.steps.map((step, index) =>
+    localEnhanceStep(step, selectedSupplierLogoNoiseDraft.questions[index]),
+  );
+  assertCheck(
+    "selected supplier card strips logo and status OCR noise",
+    enhancedSelectedSupplierLogoNoiseSteps.includes('Verify that "TIM S.p.A." is displayed in the "Selected supplier" section.') &&
+      enhancedSelectedSupplierLogoNoiseSteps.includes('Click the "Select contact" button.') &&
+      enhancedSelectedSupplierLogoNoiseSteps.includes('Click the "Continue" button.') &&
+      !enhancedSelectedSupplierLogoNoiseSteps.some((step) => /Z=TIM|Status: New Supplier|Add another supplier/i.test(step)),
   );
 
   const noisyOcrDraft = generateStepsFromScreenshotText(
