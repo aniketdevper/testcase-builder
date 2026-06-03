@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260603-footer-doc-cleanup";
+const APP_VERSION = "20260603-generic-sutra-fields";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -875,6 +875,14 @@ function cleanDocumentDisplayValue(value) {
     .trim();
 }
 
+function cleanFieldDisplayValue(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/\s*[~^˄˅⌃⌄]+\s*(?:back\s+)?(?:continue|submit)$/i, "")
+    .replace(/\s+(?:back\s+)?(?:continue|submit)$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function cleanAutoPopulatedFieldValue(value) {
   return cleanOcrDisplayValue(value)
     .replace(/^[a-z]?[A-Z]{1,3}\s+(?=[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3}\s*\()/, "")
@@ -1235,7 +1243,7 @@ function isTopLevelScreenTitleLine(line, lineIndex) {
 }
 
 function isLikelyFieldLabel(line) {
-  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|date|title|requestor|requester|describe|business need|company|field|select|specify|specification|objective|geography|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
+  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|date|title|requestor|requester|describe|business need|company|field|select|specify|specification|objective|geography|delivery location|location|address|purchase org|purchase organization|region|services? offered|opportunity number|additional instructions|watchers?)/i.test(
     String(line || ""),
   );
 }
@@ -1286,6 +1294,19 @@ function inferToggleSelectionFromLine(label, line) {
   if (!/\bno\b.*\byes\b/i.test(cleanLine)) return "";
   if (/(legal review|ask for|enable|allow|include|require|needed)/i.test(cleanLabel)) return "Yes";
   return "";
+}
+
+function isCombinedUserDepartmentLabel(label) {
+  const cleanLabel = cleanOcrLabel(label);
+  return /\buser\b/i.test(cleanLabel) && /\bdepartment\b/i.test(cleanLabel);
+}
+
+function parseCombinedUserDepartmentValue(value) {
+  const cleanValue = cleanOcrDisplayValue(value);
+  if (!cleanValue) return "";
+  const withoutEmail = cleanValue.replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gi, " ").replace(/\s+/g, " ").trim();
+  if (!withoutEmail || /^department$/i.test(withoutEmail)) return "";
+  return withoutEmail.replace(/^department\s*/i, "").trim();
 }
 
 function isStandaloneUserPickerLine(line) {
@@ -1446,7 +1467,7 @@ function isContinueOnlyScreenshotDraft(step) {
 
 function getScreenshotFieldType(label) {
   const lower = cleanOcrLabel(label).toLowerCase();
-  if (/^region\b/.test(lower)) return "form";
+  if (/^region\b/.test(lower) && !/\b(country|supplier|used|delivered|performed)\b/.test(lower)) return "form";
   if (/assessment needed/.test(lower)) return "question";
   if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
@@ -1454,7 +1475,11 @@ function getScreenshotFieldType(label) {
   if (/\b(upload|docs?|documents?|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
     return "document";
   }
-  if (/(country|dropdown|hacat|payment terms|incoterms|tax type|category|option|list|department|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
+  if (
+    /(country|dropdown|hacat|payment terms|incoterms|tax type|category|option|list|department|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization|services? offered)/.test(
+      lower,
+    )
+  ) {
     return "dropdown";
   }
   if (isChoiceFieldLabel(lower)) return "question";
@@ -1481,6 +1506,7 @@ function createScreenshotStepForValue(label, value) {
   if (/requestor|requester/i.test(cleanLabel)) cleanValue = cleanAutoPopulatedFieldValue(cleanValue);
   if (fieldType === "document") cleanValue = cleanDocumentDisplayValue(cleanValue);
   if (fieldType === "date") cleanValue = cleanDateDisplayValue(cleanValue);
+  if (fieldType === "field") cleanValue = cleanFieldDisplayValue(cleanValue);
   if (isAmountLikeFieldLabel(cleanLabel)) cleanValue = cleanAmountDisplayValue(cleanValue);
   if (/opportunity number/i.test(cleanLabel)) cleanValue = cleanOpportunityNumberValue(cleanValue);
   const lowerValue = cleanValue.toLowerCase();
@@ -2335,7 +2361,7 @@ function parseProcessDetailsPage(lines) {
   const cleanLines = (lines || []).map((line) => cleanOcrDisplayValue(line)).filter(Boolean);
   const joinedText = cleanLines.join(" ");
   const rawJoinedText = normalizedLines.join(" ");
-  const hasProcessDetailsSignals = /process details/i.test(joinedText) && /estimated duration/i.test(joinedText) && /\bsubmit\b/i.test(joinedText);
+  const hasProcessDetailsSignals = /process details/i.test(joinedText) && /estimated duration/i.test(joinedText);
   if (!hasProcessDetailsSignals || /request title/i.test(joinedText)) return { steps: [], questions: [] };
 
   const duration = getProcessDurationFromText(rawJoinedText);
@@ -2472,6 +2498,20 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
         pendingOptions = false;
         return;
       }
+    }
+
+    if (pendingLabel && isCombinedUserDepartmentLabel(pendingLabel)) {
+      const departmentValue = parseCombinedUserDepartmentValue(cleanLine);
+      if (departmentValue) generated.push(createScreenshotStepForValue("Department", departmentValue));
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
+    }
+
+    if (pendingLabel && /^user$/i.test(cleanOcrLabel(pendingLabel)) && isEmailLine(cleanLine)) {
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
     }
 
     const footerActionButton = getFooterActionButtonFromLine(cleanLine);
@@ -4418,7 +4458,9 @@ function applyVisualActionFallbacks(parsed, hasVisualContinueButton, sourceText 
   const questions = [...(parsed.questions || [])];
   const hasAnyActionButton = steps.some((step) => /\b(button|click)\b.*\b(continue|submit)\b|\b(continue|submit)\b.*\bbutton\b/i.test(step));
   const isDashboardTileOnly = steps.length === 1 && /^tile\b/i.test(steps[0] || "");
-  const actionLabel = /\bsubmit\b/i.test(sourceText) ? "Submit" : "Continue";
+  const isProcessDetailsScreen =
+    /process details/i.test(sourceText) || steps.some((step) => /process details displays|process details page/i.test(String(step || "")));
+  const actionLabel = /\bsubmit\b/i.test(sourceText) || isProcessDetailsScreen ? "Submit" : "Continue";
 
   if (steps.length && hasVisualContinueButton && !hasAnyActionButton && !isDashboardTileOnly) {
     steps.push(`button ${actionLabel}`);
@@ -5547,6 +5589,43 @@ function runSelfTests() {
       enhancedPepRequestDetailsSteps.includes('Select "PEP_1" from the "Cost Center" dropdown field.') &&
       enhancedPepRequestDetailsSteps.includes('Click the "Continue" button.') &&
       !enhancedPepRequestDetailsSteps.some((step) => /\bWw\b|Department form|Cost Center form/i.test(step)),
+  );
+
+  const sutraRequestDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Global Procurement Intake",
+      "Title",
+      "Supplier onboarding",
+      "Region or country supplier is used",
+      "India",
+      "Services offered by the supplier",
+      "IT x",
+      "Primary business entity",
+      "Sutra",
+      "Additional business entity (optional)",
+      "Sutra x",
+      "User Department",
+      "customeradmin+sutra_dev@orolabs.ai Digital Marketing",
+      "Comment / Details",
+      "Test ~ Continue",
+      "Continue",
+    ]),
+  );
+  const enhancedSutraRequestDetailsSteps = sutraRequestDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, sutraRequestDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "generic supplier intake fields are paired without merged user department noise",
+    enhancedSutraRequestDetailsSteps.includes('Verify that "Global Procurement Intake" form is visible on screen.') &&
+      enhancedSutraRequestDetailsSteps.includes('Enter "Supplier onboarding" in the "Title" field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Select "India" from the "Region or country supplier is used" dropdown field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Select "IT" from the "Services offered by the supplier" dropdown field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Select "Sutra" from the "Primary business entity" dropdown field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Select "Sutra" from the "Additional business entity" dropdown field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Select "Digital Marketing" from the "Department" dropdown field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Enter "Test" in the "Comment / Details" field.') &&
+      enhancedSutraRequestDetailsSteps.includes('Click the "Continue" button.') &&
+      !enhancedSutraRequestDetailsSteps.some((step) => /customeradmin\+sutra_dev|User Department|Test ~ Continue|Region or country supplier is used\" form/i.test(step)),
   );
 
   const curekaRequestDetailsDraft = generateStepsFromScreenshotText(
