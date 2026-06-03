@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260603-dashboard-status-cleanup";
+const APP_VERSION = "20260603-cureka-parser-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -858,6 +858,13 @@ function cleanOcrDisplayValue(value) {
     .trim();
 }
 
+function cleanDocumentDisplayValue(value) {
+  return cleanOcrDisplayValue(value)
+    .replace(/\b(?:click\s+to\s+upload|or\s+drag\s+and\s+drop|drag\s+and\s+drop(?:\s+here)?|this helps speed up the process)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function cleanAutoPopulatedFieldValue(value) {
   return cleanOcrDisplayValue(value)
     .replace(/\s+\b(?:ww|w|x|v)\b\s*$/i, "")
@@ -868,6 +875,7 @@ function cleanAutoPopulatedFieldValue(value) {
 function cleanOcrLabel(value) {
   return cleanOcrDisplayValue(value)
     .replace(/\s+\d+\s+(?:indicative budgetary quote|full buying process\s*\(purchase transaction\)|customer bid assistance)\s*$/i, "")
+    .replace(/\s*\((?:optional|required)\)\s*/gi, " ")
     .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
     .replace(/\s*[®©ⓘ]\s*$/g, "")
     .replace(/\s*[~^˄˅⌃⌄]\s*$/g, "")
@@ -1085,6 +1093,7 @@ function isBrowserChromeOcrLine(line) {
 
 function cleanDashboardTileCandidate(line) {
   return cleanOcrLabel(line)
+    .replace(/^(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s+/gi, "")
     .replace(/\s+(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))*\s*$/gi, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -1092,13 +1101,16 @@ function cleanDashboardTileCandidate(line) {
 
 function hasSelectedDashboardTileSignal(line) {
   const cleanLine = cleanOcrLabel(line);
-  return /\s(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s*$/i.test(cleanLine);
+  return (
+    /\s(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s*$/i.test(cleanLine) ||
+    /^(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s+/i.test(cleanLine)
+  );
 }
 
 function isLikelyDashboardTileDescription(line) {
   const cleanLine = cleanDashboardTileCandidate(line).toLowerCase();
   if (!cleanLine) return false;
-  return /^(?:intake process(?:\s*\(\d+\))?|this is\b|boarding in oro|testing(?:\s+ai\s+agent)?|test|compute form|procurement intake for|request for|process to)\b/i.test(
+  return /^(?:intake process(?:\s*\(\d+\))?|this is\b|boarding in oro|testing(?:\s+ai\s+agent)?|test|compute form|procurement intake for|request for|process to|simple process to test|simple procurement request|universal purchasing intake|supplier onboarding\s*[-–—]\s*industry grade)\b/i.test(
     cleanLine,
   );
 }
@@ -1107,8 +1119,12 @@ function isDashboardTileCandidate(line) {
   const cleanLine = cleanDashboardTileCandidate(line);
   if (!cleanLine || cleanLine.length > 70) return false;
   if (isButtonLikeText(cleanLine) || isBrowserChromeOcrLine(cleanLine) || isLikelyOcrNoiseLine(cleanLine)) return false;
-  if (/^(start new|see all|my requests|home|tasks|requests|suppliers|more|ask procure ai|front door|priority|requester)$/i.test(cleanLine)) return false;
-  if (/^(please|this is|process to|request for|procurement intake for|testing|test)\b/i.test(cleanLine)) return false;
+  if (/^(start new|see all|see less|my requests|home|tasks|requests|suppliers|more|ask procure ai|front door|priority|requester)$/i.test(cleanLine)) {
+    return false;
+  }
+  if (/^(please|this is|process to|request for|procurement intake for|testing|test|simple process to test|simple procurement request|universal purchasing intake)\b/i.test(cleanLine)) {
+    return false;
+  }
   if (/\b(describe your business needs|upload quote|upload offer|see all requests|started on|assigned to|current step|completion)\b/i.test(cleanLine)) return false;
   if (/^ORO-\d+/i.test(cleanLine)) return false;
 
@@ -1161,14 +1177,15 @@ function findRelatedDashboardTitle(tileCandidates, descriptionItem) {
 function getDashboardTileLabel(lines) {
   const cleanLines = (lines || []).map((line) => cleanOcrLabel(line)).filter(Boolean);
   const combined = cleanLines.join(" ");
-  const hasDashboardSignals =
-    /\bstart new\b/i.test(combined) &&
-    (/\bmy requests\b/i.test(combined) || /\bask procure\b/i.test(combined) || /\bsee all\b/i.test(combined) || /\bhome\s+tasks\s+requests\s+suppliers\b/i.test(combined));
-  if (!hasDashboardSignals) return "";
+  const hasDashboardLayoutSignal = /\b(start new|my requests|see less|see all requests|see all)\b/i.test(combined);
+  const hasDashboardNavSignal = /\bhome\s+tasks\s+requests\s+suppliers\b|\bask\s+(?:procure|oro)\b/i.test(combined);
+  if (!hasDashboardLayoutSignal || !hasDashboardNavSignal) return "";
 
   const startIndex = cleanLines.findIndex((line) => /\bstart new\b/i.test(line));
-  const endIndex = cleanLines.findIndex((line, index) => index > startIndex && /\bmy requests\b/i.test(line));
-  const tileZone = cleanLines.slice(Math.max(0, startIndex + 1), endIndex > startIndex ? endIndex : cleanLines.length);
+  const selectedLineIndex = cleanLines.findIndex((line) => hasSelectedDashboardTileSignal(line));
+  const dashboardStart = selectedLineIndex >= 0 && (startIndex < 0 || selectedLineIndex < startIndex) ? 0 : startIndex >= 0 ? startIndex + 1 : 0;
+  const endIndex = cleanLines.findIndex((line, index) => index > dashboardStart && /\bmy requests\b/i.test(line));
+  const tileZone = cleanLines.slice(dashboardStart, endIndex > dashboardStart ? endIndex : cleanLines.length);
   const tileCandidates = tileZone
     .map((line, index) => ({ raw: line, clean: cleanDashboardTileCandidate(line), selected: hasSelectedDashboardTileSignal(line), index }))
     .filter((item) => isDashboardTileCandidate(item.raw));
@@ -1206,13 +1223,13 @@ function isTopLevelScreenTitleLine(line, lineIndex) {
 }
 
 function isLikelyFieldLabel(line) {
-  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|date|requestor|requester|describe|business need|company|field|select|specify|specification|objective|geography|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
+  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|date|title|requestor|requester|describe|business need|company|field|select|specify|specification|objective|geography|delivery location|location|address|purchase org|purchase organization|region|opportunity number|additional instructions|watchers?)/i.test(
     String(line || ""),
   );
 }
 
 function isChoiceFieldLabel(line) {
-  return /(purpose of this request|payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|marketing activity|digital channels|customer personal data|external supplier|third party|supplier access|legal documentation|documentation is required|high-value|long-term financial commitment|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
+  return /(purpose of this request|payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|marketing activity|digital channels|customer personal data|external supplier|third party|supplier access|legal review|legal documentation|documentation is required|high-value|long-term financial commitment|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
     String(line || ""),
   );
 }
@@ -1233,13 +1250,30 @@ function isStandaloneUploadDropzoneLine(line) {
   return /\bclick\s+to\s+upload\b|\bdrag\s+and\s+drop\b/i.test(cleanOcrDisplayValue(line));
 }
 
+function isDocumentHelperTextLine(line) {
+  return /\b(this helps speed up the process|click\s+to\s+upload|drag\s+and\s+drop(?:\s+here)?)\b/i.test(cleanOcrDisplayValue(line));
+}
+
+function isDragDropOnlyHelperLine(line) {
+  return /^drag\s+and\s+drop(?:\s+here)?$/i.test(cleanOcrDisplayValue(line));
+}
+
+function inferToggleSelectionFromLine(label, line) {
+  const cleanLabel = cleanOcrLabel(label);
+  const cleanLine = cleanOcrDisplayValue(line);
+  if (!cleanLabel || !cleanLine) return "";
+  if (!/\bno\b.*\byes\b/i.test(cleanLine)) return "";
+  if (/(legal review|ask for|enable|allow|include|require|needed)/i.test(cleanLabel)) return "Yes";
+  return "";
+}
+
 function isStandaloneUserPickerLine(line) {
   const compact = cleanOcrDisplayValue(line).toLowerCase().replace(/[^a-z]/g, "");
   return /selectuser|saectuser|seiectuser|slectuser/.test(compact);
 }
 
 function isInformationalTextLine(line) {
-  return /(^to onboard\b|please follow|click .* to proceed|^proceed\.?$)/i.test(String(line || ""));
+  return /(^to onboard\b|please follow|click .* to proceed|^proceed\.?$|this helps speed up the process)/i.test(String(line || ""));
 }
 
 function isSupplierCardLabel(line) {
@@ -1390,23 +1424,23 @@ function isContinueOnlyScreenshotDraft(step) {
 }
 
 function getScreenshotFieldType(label) {
-  const lower = String(label || "").toLowerCase();
+  const lower = cleanOcrLabel(label).toLowerCase();
   if (/^region\b/.test(lower)) return "form";
   if (/assessment needed/.test(lower)) return "question";
   if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
   if (isSupplierCardLabel(label)) return "supplier";
-  if (isChoiceFieldLabel(label)) return "question";
-  if (/\b(upload|documents?|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
+  if (/\b(upload|docs?|documents?|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
     return "document";
   }
-  if (/(country|dropdown|select|hacat|payment terms|incoterms|tax type|category|option|list|department|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
+  if (/(country|dropdown|hacat|payment terms|incoterms|tax type|category|option|list|department|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization)/.test(lower)) {
     return "dropdown";
   }
+  if (isChoiceFieldLabel(lower)) return "question";
   if (/(assignee|owner|requestor|requester|user|approver|buyer|manager|watchers?)/.test(lower)) return "assignee";
   if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (
-    /(name|email|number|amount|budget|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|objective|specification|delivery location|location)/.test(
+    /(title|name|email|number|amount|budget|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|objective|specification|delivery location|location)/.test(
       lower,
     )
   ) {
@@ -1424,6 +1458,7 @@ function createScreenshotStepForValue(label, value) {
   const fieldType = getScreenshotFieldType(cleanLabel);
 
   if (/requestor|requester/i.test(cleanLabel)) cleanValue = cleanAutoPopulatedFieldValue(cleanValue);
+  if (fieldType === "document") cleanValue = cleanDocumentDisplayValue(cleanValue);
   if (fieldType === "date") cleanValue = cleanDateDisplayValue(cleanValue);
   if (isAmountLikeFieldLabel(cleanLabel)) cleanValue = cleanAmountDisplayValue(cleanValue);
   if (/opportunity number/i.test(cleanLabel)) cleanValue = cleanOpportunityNumberValue(cleanValue);
@@ -1441,9 +1476,9 @@ function createScreenshotStepForValue(label, value) {
     return { step: "search location", question: cleanLabel };
   }
 
+  if (fieldType === "dropdown") return { step: cleanValue ? `dropdown "${cleanValue}"` : "dropdown", question: cleanLabel };
   if (isChoiceFieldLabel(cleanLabel) && cleanValue) return { step: `select ${cleanValue}`, question: cleanLabel };
   if (OCR_OPTION_VALUES.has(lowerValue)) return { step: `select ${lowerValue}`, question: cleanLabel };
-  if (fieldType === "dropdown") return { step: cleanValue ? `dropdown "${cleanValue}"` : "dropdown", question: cleanLabel };
   if (/requestor|requester/i.test(cleanLabel) && cleanValue) return { step: `auto "${cleanValue}"`, question: cleanLabel };
   if (fieldType === "assignee") return { step: cleanValue ? `assignee "${cleanValue}"` : "assignee", question: cleanLabel };
   if (fieldType === "date") return { step: cleanValue ? `date "${cleanValue}"` : "date", question: cleanLabel };
@@ -2306,17 +2341,20 @@ function parseProcessDetailsPage(lines) {
 }
 
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
-  const rawLines = splitLines(text)
+  const normalizedLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
-    .filter((line) => !isBrowserChromeOcrLine(line))
     .filter((line, index, lines) => line && (index === 0 || line !== lines[index - 1]));
-  const dashboardTileLabel = getDashboardTileLabel(rawLines);
+  const dashboardTileLabel = getDashboardTileLabel(normalizedLines);
   if (dashboardTileLabel) {
     return {
       steps: [`tile ${dashboardTileLabel}`],
       questions: [""],
     };
   }
+
+  const rawLines = normalizedLines
+    .filter((line) => !isBrowserChromeOcrLine(line))
+    .filter((line, index, lines) => line && (index === 0 || line !== lines[index - 1]));
   const submissionSummaryDraft = parseSubmissionSummaryPage(rawLines);
   if (submissionSummaryDraft.steps.length) return submissionSummaryDraft;
   const processDetailsDraft = parseProcessDetailsPage(rawLines);
@@ -2388,6 +2426,45 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       return;
     }
 
+    if (pendingLabel && getScreenshotFieldType(pendingLabel) === "document" && isDocumentHelperTextLine(cleanLine)) {
+      const documentValue = cleanDocumentDisplayValue(cleanLine);
+      const remainingLabel = documentValue.match(/\b(delivery location|shipping address|address)\b/i)?.[1] || "";
+      if (remainingLabel) {
+        generated.push(createPendingLabelStep(pendingLabel));
+        pendingLabel = titleCase(remainingLabel);
+        pendingOptions = false;
+        return;
+      }
+      if (documentValue) {
+        generated.push(createScreenshotStepForValue(pendingLabel, documentValue));
+        pendingLabel = "";
+        pendingOptions = false;
+      }
+      return;
+    }
+
+    if (pendingLabel) {
+      const inferredToggleValue = inferToggleSelectionFromLine(pendingLabel, cleanLine);
+      if (inferredToggleValue) {
+        generated.push({ step: `toggle ${inferredToggleValue}`, question: pendingLabel });
+        pendingLabel = "";
+        pendingOptions = false;
+        return;
+      }
+    }
+
+    if (pendingLabel && getScreenshotFieldType(pendingLabel) === "document" && !isButtonLikeText(cleanLine) && !isInformationalTextLine(cleanLine)) {
+      const nextLineIsDropHelper = isDragDropOnlyHelperLine(nextLine) || /\bdrag and drop\b/i.test(cleanOcrDisplayValue(nextLine));
+      const documentValue = cleanDocumentDisplayValue(cleanLine);
+      if (documentValue && nextLineIsDropHelper && !isStandaloneUploadDropzoneLine(cleanLine)) {
+        generated.push(createScreenshotStepForValue(pendingLabel, documentValue));
+        pendingLabel = "";
+        pendingOptions = false;
+        skipUntilLineIndex = lineIndex + 1;
+        return;
+      }
+    }
+
     if (!pendingLabel && isTopLevelScreenTitleLine(cleanLine, lineIndex)) {
       generated.push({ step: "form verify visible on screen", question: cleanOcrLabel(cleanLine) });
       hasGeneratedFirstScreenStep = true;
@@ -2395,6 +2472,8 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     }
 
     if (!pendingLabel && isMalformedChoiceQuestionLabel(cleanLine)) return;
+
+    if (!pendingLabel && isDragDropOnlyHelperLine(cleanLine)) return;
 
     if (!pendingLabel && isStandaloneUploadDropzoneLine(cleanLine)) {
       generated.push({ step: "document", question: "Upload additional documents (if any)" });
@@ -2474,7 +2553,8 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       return;
     }
 
-    if (pendingLabel && (getScreenshotFieldType(pendingLabel) === "question" || isChoiceFieldLabel(pendingLabel))) {
+    const pendingFieldType = pendingLabel ? getScreenshotFieldType(pendingLabel) : "";
+    if (pendingLabel && (pendingFieldType === "question" || (pendingFieldType !== "dropdown" && isChoiceFieldLabel(pendingLabel)))) {
       const visualGroup = peekVisualSelectionGroup();
       const shouldUseMultiSelectFallback = isMultiSelectQuestionLabel(pendingLabel);
       const hasMarkedOptionsNearby = hasNearbyChoiceMarker(rawLines, lineIndex);
@@ -5325,6 +5405,35 @@ function runSelfTests() {
       localEnhanceStep(splitPepDashboardDraft.steps[0]) === 'Click on the "PEP_Co Intake Process" tile from the dashboard.',
   );
 
+  const curekaDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "CUREKA Home Tasks Requests Suppliers More",
+      "Pharma Supplier Onboarding",
+      "Pharma Procurement Intake",
+      "Supplier Onboarding - Industry G...",
+      "Training Request Process",
+      "Industry Grade Simple process to test form and master data",
+      "Basic Procurement Intake",
+      "Simple procurement request for Cureka",
+      "General Purchase Intake 2",
+      "Test",
+      "v In v In General Purchasing Intake Process",
+      "Universal purchasing intake with amount and category-based approvals",
+      "Start New",
+      "See Less",
+      "My Requests See all requests >",
+      "ORO-547 Software Intake",
+      "Software for Data Analysis",
+      "Requester Supplier",
+    ]),
+  );
+  assertCheck(
+    "generic dashboard selected tile ignores card descriptions and request history",
+    curekaDashboardDraft.steps.length === 1 &&
+      curekaDashboardDraft.steps[0] === "tile General Purchasing Intake Process" &&
+      localEnhanceStep(curekaDashboardDraft.steps[0]) === 'Click on the "General Purchasing Intake Process" tile from the dashboard.',
+  );
+
   const visualRadioDraft = generateStepsFromScreenshotText(
     joinLines(["First radio question?", "O Yes © No", "Second radio question?", "Yes © No"]),
     [
@@ -5405,6 +5514,32 @@ function runSelfTests() {
       enhancedPepRequestDetailsSteps.includes('Select "PEP_1" from the "Cost Center" dropdown field.') &&
       enhancedPepRequestDetailsSteps.includes('Click the "Continue" button.') &&
       !enhancedPepRequestDetailsSteps.some((step) => /\bWw\b|Department form|Cost Center form/i.test(step)),
+  );
+
+  const curekaRequestDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Request Details",
+      "Enter Your Request Title",
+      "Test",
+      "Choose Category of purchase",
+      "IT",
+      "Choose Which Company Entity You Belong.",
+      "Cureka India Pvt. Ltd.",
+      "Purchase Items",
+      "Continue",
+    ]),
+  );
+  const enhancedCurekaRequestDetailsSteps = curekaRequestDetailsDraft.steps.map((step, index) =>
+    localEnhanceStep(step, curekaRequestDetailsDraft.questions[index]),
+  );
+  assertCheck(
+    "generic purchase request details keep title and dropdown values",
+    enhancedCurekaRequestDetailsSteps.includes('Verify that "Request Details" form is visible on screen.') &&
+      enhancedCurekaRequestDetailsSteps.includes('Enter "Test" in the "Enter Your Request Title" field.') &&
+      enhancedCurekaRequestDetailsSteps.includes('Select "IT" from the "Choose Category of purchase" dropdown field.') &&
+      enhancedCurekaRequestDetailsSteps.includes('Select "Cureka India Pvt. Ltd." from the "Choose Which Company Entity You Belong." dropdown field.') &&
+      enhancedCurekaRequestDetailsSteps.includes('Click the "Continue" button.') &&
+      !enhancedCurekaRequestDetailsSteps.some((step) => /Enter Your Request Title\" form|Purchase Items|form or information/i.test(step)),
   );
 
   const requestPurposeDraft = generateStepsFromScreenshotText(
@@ -5578,6 +5713,35 @@ function runSelfTests() {
       enhancedBudgetFulfillmentSteps.includes('Select "Jun 3, 2026" in the "When do you need this request to be fulfilled?" date field.') &&
       enhancedBudgetFulfillmentSteps.includes('Click the "Continue" button.') &&
       !enhancedBudgetFulfillmentSteps.some((step) => /When do you need.*select|12,312.*visible/i.test(step)),
+  );
+
+  const legalReviewOptionalDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Ask for legal review",
+      "No Yes",
+      "Supplier payment terms (Optional)",
+      "Net45",
+      "Add supplier docs you already have (Optional)",
+      "This helps speed up the process",
+      "Sow / Proposal",
+      "Drag and drop here",
+      "Additional docs (Optional)",
+      "Additional doc",
+      "Drag and drop here",
+      "Continue",
+    ]),
+  );
+  const enhancedLegalReviewOptionalSteps = legalReviewOptionalDraft.steps.map((step, index) =>
+    localEnhanceStep(step, legalReviewOptionalDraft.questions[index]),
+  );
+  assertCheck(
+    "optional legal review screen parses toggle payment terms and document values",
+    enhancedLegalReviewOptionalSteps.includes('Set the "Ask for legal review" toggle to "Yes".') &&
+      enhancedLegalReviewOptionalSteps.includes('Select "Net45" from the "Supplier payment terms" dropdown field.') &&
+      enhancedLegalReviewOptionalSteps.includes('For the "Add supplier docs you already have", select the "Sow / Proposal" document.') &&
+      enhancedLegalReviewOptionalSteps.includes('For the "Additional docs", select the "Additional doc" document.') &&
+      enhancedLegalReviewOptionalSteps.includes('Click the "Continue" button.') &&
+      !enhancedLegalReviewOptionalSteps.some((step) => /This helps speed|Drag and drop|Optional|visible on screen/i.test(step)),
   );
 
   const engagementDetailsDraft = generateStepsFromScreenshotText(
