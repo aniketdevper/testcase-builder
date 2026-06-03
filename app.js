@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260603-generic-sutra-fields";
+const APP_VERSION = "20260603-generic-sandbox-fields";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -802,7 +802,11 @@ function isButtonLikeText(line) {
 }
 
 function getFooterActionButtonFromLine(line) {
-  const cleanLine = cleanOcrDisplayValue(line);
+  const cleanLine = cleanOcrDisplayValue(line)
+    .replace(/^[~`'’"“”|\s]+|[~`'’"“”|\s]+$/g, "")
+    .replace(/\s*[~|]\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!cleanLine) return "";
   if (/^new supplier onboarding$/i.test(cleanLine)) return "";
   if (isButtonLikeText(cleanLine)) return /^submit task$/i.test(cleanLine) ? "Submit task" : titleCase(cleanLine);
@@ -1112,25 +1116,27 @@ function isBrowserChromeOcrLine(line) {
 }
 
 function cleanDashboardTileCandidate(line) {
+  const markerToken = String.raw`(?:oo|o|0|[vV]|tn|in|ll|ii|l|[)>|])`;
   return cleanOcrLabel(line)
-    .replace(/^(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s+/gi, "")
-    .replace(/\s+(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))*\s*$/gi, "")
+    .replace(new RegExp(`^${markerToken}(?:\\s+${markerToken})+\\s+`, "gi"), "")
+    .replace(new RegExp(`\\s+${markerToken}(?:\\s+${markerToken})*\\s*$`, "gi"), "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function hasSelectedDashboardTileSignal(line) {
   const cleanLine = cleanOcrLabel(line);
+  const markerToken = String.raw`(?:oo|o|0|[vV]|tn|in|ll|ii|l|[)>|])`;
   return (
-    /\s(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s*$/i.test(cleanLine) ||
-    /^(?:[vV]|tn|in|ll|ii|l|[)>|])(?:\s+(?:[vV]|tn|in|ll|ii|l|[)>|]))+\s+/i.test(cleanLine)
+    new RegExp(`\\s${markerToken}(?:\\s+${markerToken})+\\s*$`, "i").test(cleanLine) ||
+    new RegExp(`^${markerToken}(?:\\s+${markerToken})+\\s+`, "i").test(cleanLine)
   );
 }
 
 function isLikelyDashboardTileDescription(line) {
   const cleanLine = cleanDashboardTileCandidate(line).toLowerCase();
   if (!cleanLine) return false;
-  return /^(?:intake process(?:\s*\(\d+\))?|this is\b|boarding in oro|testing(?:\s+ai\s+agent)?|test|compute form|procurement intake for|request for|process to|simple process to test|simple procurement request|universal purchasing intake|supplier onboarding\s*[-–—]\s*industry grade)\b/i.test(
+  return /^(?:intake process(?:\s*\(\d+\))?|entry point for procurement|new chemical procurement process|this is\b|boarding in oro|testing(?:\s+ai\s+agent)?|test|compute form|procurement intake for|request for|process to|simple process to test|simple procurement request|universal purchasing intake|supplier onboarding\s*[-–—]\s*industry grade)\b/i.test(
     cleanLine,
   );
 }
@@ -1243,13 +1249,13 @@ function isTopLevelScreenTitleLine(line, lineIndex) {
 }
 
 function isLikelyFieldLabel(line) {
-  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|date|title|requestor|requester|describe|business need|company|field|select|specify|specification|objective|geography|delivery location|location|address|purchase org|purchase organization|region|services? offered|opportunity number|additional instructions|watchers?)/i.test(
+  return /(amount|budget|entity|companyentity|department|cost center|payment method|required by date|lead time|date|title|requestor|requester|describe|business need|company|category|field|select|specify|specification|objective|geography|delivery location|delivery type|location|address|purchase org|purchase organization|region|services? offered|opportunity number|additional instructions|watchers?|unit price|quantity|total amount)/i.test(
     String(line || ""),
   );
 }
 
 function isChoiceFieldLabel(line) {
-  return /(purpose of this request|payment method|request type|type of supplier|supplier type|type of engagement|engagement supported|marketing activity|digital channels|customer personal data|external supplier|third party|supplier access|legal review|legal documentation|documentation is required|high-value|long-term financial commitment|sales opportunity|delivery fulfillment|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
+  return /(purpose of this request|payment method|request type|type of supplier|supplier type|submitting.*behalf|on behalf of another user|requesting on behalf|type of engagement|engagement supported|marketing activity|digital channels|customer personal data|external supplier|third party|supplier access|legal review|legal documentation|documentation is required|high-value|long-term financial commitment|sales opportunity|delivery fulfillment|cost case|capital expenditure|reusable assets|usage of ai|signed nda|legal\s*&?\s*compliance|data security|financial stability|logistics compliance|operational risk|yes\/no|yes or no|choose|select one|option|critical|challenging|types of internal information|internal information)/i.test(
     String(line || ""),
   );
 }
@@ -1318,6 +1324,65 @@ function isInformationalTextLine(line) {
   return /(^to onboard\b|please follow|click .* to proceed|^proceed\.?$|this helps speed up the process)/i.test(String(line || ""));
 }
 
+function isMandatoryLine(line) {
+  return /^\*?\s*mandatory\b/i.test(cleanOcrDisplayValue(line));
+}
+
+function isIgnoredInformationalTextLine(line) {
+  const cleanLine = cleanOcrDisplayValue(line);
+  return (
+    /^(?:risk\s*&\s*compliance questions|selected supplier is already onboarded)$/i.test(cleanLine) ||
+    /^cancel request(?:\s+if\b.*)?$/i.test(cleanLine) ||
+    /^existing supplier$/i.test(cleanLine) ||
+    /this supplier does\s+not\s+have\s+an\s+active/i.test(cleanLine) ||
+    /budget approval will be required/i.test(cleanLine) ||
+    /this is a\s+(?:low|medium|high)\s+risk engagement/i.test(cleanLine)
+  );
+}
+
+function isGenericFieldHelperTextLine(label, line) {
+  const cleanLabel = cleanOcrLabel(label);
+  const cleanLine = cleanOcrDisplayValue(line);
+  if (!cleanLabel || !cleanLine) return false;
+  if (isButtonLikeText(cleanLine) || getFooterActionButtonFromLine(cleanLine)) return false;
+  if (hasChoiceSelectedOcrMarker(cleanLine) || hasUnselectedOcrMarker(cleanLine) || isOcrOptionOnlyLine(cleanLine)) return false;
+  return (
+    /^name of the project\b/i.test(cleanLine) ||
+    /^what do you need\?\s*according\b/i.test(cleanLine) ||
+    /^according to this category\b/i.test(cleanLine) ||
+    /^unit price of the product\b/i.test(cleanLine) ||
+    /^quantity of the product\b/i.test(cleanLine) ||
+    /^total amount\s*=/i.test(cleanLine) ||
+    /^select .*category.*recommended/i.test(cleanLine)
+  );
+}
+
+function isSectionPrefixedQuestionLine(line) {
+  return /^(?:legal\s*&?\s*compliance|data security|financial stability|logistics compliance|operational risk)\s*:/i.test(cleanOcrLabel(line));
+}
+
+function collectSectionPrefixedQuestionLabel(lines, startIndex) {
+  const parts = [];
+  let endIndex = startIndex - 1;
+
+  for (let index = startIndex; index < lines.length && index < startIndex + 4; index += 1) {
+    const cleanLine = cleanOcrLabel(stripWrappingQuotes(normalizeOcrLine(lines[index]).replace(/[:*]+$/g, "").trim()));
+    if (!cleanLine || isLikelyOcrNoiseLine(cleanLine) || isMandatoryLine(cleanLine)) continue;
+    if (index > startIndex && (isButtonLikeText(cleanLine) || getFooterActionButtonFromLine(cleanLine))) break;
+    if (index > startIndex && (hasChoiceSelectedOcrMarker(cleanLine) || hasUnselectedOcrMarker(cleanLine) || isOcrOptionOnlyLine(cleanLine))) break;
+    if (index > startIndex && isSectionPrefixedQuestionLine(cleanLine)) break;
+
+    parts.push(cleanLine);
+    endIndex = index;
+    if (/[?]$/.test(cleanLine)) break;
+  }
+
+  return {
+    label: cleanOcrLabel(parts.join(" ").replace(/\s+/g, " ").trim()),
+    endIndex,
+  };
+}
+
 function isSupplierCardLabel(line) {
   return /\bselected supplier\b/i.test(String(line || ""));
 }
@@ -1339,7 +1404,15 @@ function cleanSupplierCardName(line) {
     .trim();
 
   if (!clean) return "";
-  if (/^(selected supplier|contact|enabled for:?|payment terms|status:?|add another supplier|back|continue)$/i.test(clean) || isSupplierStatusLine(clean)) return "";
+  if (
+    /^(selected supplier|selected supplier is already onboarded|cancel request|existing supplier|contact|enabled for:?|payment terms|status:?|add another supplier|back|continue)$/i.test(
+      clean,
+    ) ||
+    isSupplierStatusLine(clean) ||
+    isIgnoredInformationalTextLine(clean)
+  ) {
+    return "";
+  }
   if (parseSupplierDetailLine(clean) || /@/.test(clean) || /payment terms/i.test(clean)) return "";
   return clean;
 }
@@ -1383,6 +1456,9 @@ function parseSelectedSupplierCard(lines, startIndex) {
     if (/^(back|continue)$/i.test(cleanLine)) break;
     if (/^\+?\s*add another supplier$/i.test(cleanLine)) break;
     if (isSupplierStatusLine(cleanLine)) continue;
+    if (/^cancel request$/i.test(cleanLine)) continue;
+    if (/selected supplier is already onboarded|cancel request if/i.test(cleanLine)) break;
+    if (isIgnoredInformationalTextLine(cleanLine)) continue;
 
     endIndex = index;
 
@@ -1469,14 +1545,14 @@ function getScreenshotFieldType(label) {
   const lower = cleanOcrLabel(label).toLowerCase();
   if (/^region\b/.test(lower) && !/\b(country|supplier|used|delivered|performed)\b/.test(lower)) return "form";
   if (/assessment needed/.test(lower)) return "question";
-  if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
+  if (/(date|deadline|lead time|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (/\?$/.test(String(label || "").trim()) && isLikelyQuestionLabel(label)) return "question";
   if (isSupplierCardLabel(label)) return "supplier";
   if (/\b(upload|docs?|documents?|attachment|certificate|proof|w-9|w9|capa|iso|quotation)\b/.test(lower) || /\bsoc\b(?![-_])/i.test(lower)) {
     return "document";
   }
   if (
-    /(country|dropdown|hacat|payment terms|incoterms|tax type|category|option|list|department|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization|services? offered)/.test(
+    /(country|dropdown|hacat|payment terms|incoterms|tax type|category|option|list|department|delivery type|geography|entity|companyentity|cost center|company entity|purchase org|purchase organization|services? offered)/.test(
       lower,
     )
   ) {
@@ -1484,9 +1560,9 @@ function getScreenshotFieldType(label) {
   }
   if (isChoiceFieldLabel(lower)) return "question";
   if (/(assignee|owner|requestor|requester|user|approver|buyer|manager|watchers?)/.test(lower)) return "assignee";
-  if (/(date|deadline|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
+  if (/(date|deadline|lead time|start date|end date|start and end date|need this request|request to be fulfilled|be fulfilled)/.test(lower)) return "date";
   if (
-    /(title|name|email|number|amount|budget|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|objective|specification|delivery location|location)/.test(
+    /(title|name|email|number|amount|budget|reason|comment|notes|instructions?|address|ein|bank|swift|iban|field|text area|describe|description|business need|justification|purpose|objective|specification|delivery location|location|unit price|quantity|total amount|price)/.test(
       lower,
     )
   ) {
@@ -1757,8 +1833,17 @@ function normalizeCurrencyCodeLine(line) {
 const TRAILING_FIELD_LABEL_PATTERNS = [
   "Request type",
   "Target Date",
+  "Lead Time",
   "Required by date",
   "Payment method",
+  "Project title",
+  "Select the delivery type",
+  "Company Entity",
+  "Department",
+  "Category",
+  "Unit Price",
+  "Quantity",
+  "Total Amount",
   "Upload additional documents (if any)",
   "Additional instructions for the supplier",
   "Add watchers (if any)",
@@ -1901,6 +1986,7 @@ function cleanRecommendedCategoryName(line) {
     .replace(/\s+\d{4,}\s*[°ºoO]?\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
+  if (getFooterActionButtonFromLine(clean)) return "";
   if (!clean || isRecommendedCategoryHeader(clean) || isCategoryRecommendationHelperLine(clean)) return "";
   if (/^(hw|software|services?)\s*&|maintenance|purchase of|unwanted traffic|includes\b/i.test(clean)) return "";
   if (/^\(?hw\)?$/i.test(clean)) return "";
@@ -1914,7 +2000,7 @@ function parseRecommendedCategorySelection(lines, startIndex) {
   for (let index = startIndex; index < lines.length && index < startIndex + 10; index += 1) {
     const cleanLine = stripWrappingQuotes(normalizeOcrLine(lines[index]).replace(/[:*]+$/g, "").trim());
     if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
-    if (isButtonLikeText(cleanLine)) break;
+    if (isButtonLikeText(cleanLine) || getFooterActionButtonFromLine(cleanLine)) break;
 
     endIndex = index;
     if (isRecommendedCategoryHeader(cleanLine) || isCategoryRecommendationHelperLine(cleanLine)) continue;
@@ -2408,6 +2494,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   if (processDetailsDraft.steps.length) return processDetailsDraft;
 
   const generated = [];
+  const deferredFooterActions = [];
   let pendingLabel = "";
   let pendingOptions = false;
   let visualRadioIndex = 0;
@@ -2467,6 +2554,15 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       !hasUnselectedOcrMarker(cleanLine);
 
     if (isLikelyOcrNoiseLine(cleanLine) && !canUseNoisyPendingValue) return;
+    if (isMandatoryLine(cleanLine)) return;
+    if (!hasChoiceSelectedOcrMarker(cleanLine) && !hasUnselectedOcrMarker(cleanLine) && isIgnoredInformationalTextLine(cleanLine)) {
+      if (pendingLabel && getScreenshotFieldType(pendingLabel) === "document") {
+        pendingLabel = "";
+        pendingOptions = false;
+      }
+      return;
+    }
+    if (pendingLabel && !pendingOptions && isGenericFieldHelperTextLine(pendingLabel, cleanLine)) return;
     if (isSupplierStatusLine(cleanLine)) {
       pendingLabel = "";
       pendingOptions = false;
@@ -2516,7 +2612,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
 
     const footerActionButton = getFooterActionButtonFromLine(cleanLine);
     if (footerActionButton) {
-      generated.push({ step: footerActionButton === "Submit task" ? "submit task" : `button ${footerActionButton}`, question: "" });
+      deferredFooterActions.push({ step: footerActionButton === "Submit task" ? "submit task" : `button ${footerActionButton}`, question: "" });
       pendingLabel = "";
       pendingOptions = false;
       return;
@@ -2601,6 +2697,17 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
 
     if (isRecommendedCategoryHeader(cleanLine) && !pendingLabel) return;
     if (isCategoryRecommendationHelperLine(cleanLine) && !pendingLabel) return;
+
+    if (isSectionPrefixedQuestionLine(cleanLine)) {
+      if (pendingLabel && !pendingOptions) generated.push(createPendingLabelStep(pendingLabel));
+      const sectionQuestion = collectSectionPrefixedQuestionLabel(rawLines, lineIndex);
+      if (sectionQuestion.label) {
+        pendingLabel = sectionQuestion.label;
+        pendingOptions = false;
+        skipUntilLineIndex = Math.max(skipUntilLineIndex, sectionQuestion.endIndex);
+      }
+      return;
+    }
 
     if (pendingLabel && isCategoryQuestionLabel(pendingLabel)) {
       const recommendedCategory = parseRecommendedCategorySelection(rawLines, lineIndex);
@@ -2877,6 +2984,11 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   if (pendingLabel) {
     if (!pendingOptions) generated.push(createPendingLabelStep(pendingLabel));
   }
+
+  deferredFooterActions.forEach((action) => {
+    const exists = generated.some((item) => item.step === action.step && (item.question || "") === (action.question || ""));
+    if (!exists) generated.push(action);
+  });
 
   return {
     steps: generated.map((item) => item.step),
@@ -5509,6 +5621,26 @@ function runSelfTests() {
       localEnhanceStep(curekaDashboardDraft.steps[0]) === 'Click on the "General Purchasing Intake Process" tile from the dashboard.',
   );
 
+  const sandboxDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Sandbox",
+      "Home Tasks Requests Suppliers More",
+      "Start New",
+      "(A) Procurement Onboard Supplier",
+      "Knowledge Management",
+      "Oo V In New Procurement Request",
+      "New chemical procurement process",
+      "Start New",
+      "My Requests",
+    ]),
+  );
+  assertCheck(
+    "dashboard selected tile strips leading OCR markers generically",
+    sandboxDashboardDraft.steps.length === 1 &&
+      sandboxDashboardDraft.steps[0] === "tile New Procurement Request" &&
+      localEnhanceStep(sandboxDashboardDraft.steps[0]) === 'Click on the "New Procurement Request" tile from the dashboard.',
+  );
+
   const visualRadioDraft = generateStepsFromScreenshotText(
     joinLines(["First radio question?", "O Yes © No", "Second radio question?", "Yes © No"]),
     [
@@ -5654,6 +5786,39 @@ function runSelfTests() {
       !enhancedCurekaRequestDetailsSteps.some((step) => /Enter Your Request Title\" form|Purchase Items|form or information/i.test(step)),
   );
 
+  const sandboxCreateRequestDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Create new Request",
+      "New Purchase Request",
+      "Project title",
+      "Name of the project for which procurement is being done",
+      "Test",
+      "Please enter the business need",
+      "What do you need? According to this category will be recommended.",
+      "IT services",
+      "Lead Time",
+      "Jun 09, 2026",
+      "Select the delivery type",
+      "Express Delivery",
+      "~ Continue",
+    ]),
+  );
+  const enhancedSandboxCreateRequestSteps = sandboxCreateRequestDraft.steps.map((step, index) =>
+    localEnhanceStep(step, sandboxCreateRequestDraft.questions[index]),
+  );
+  assertCheck(
+    "generic create request form skips helper text and pairs values",
+    enhancedSandboxCreateRequestSteps.includes('Verify that "Create new Request" form is visible on screen.') &&
+      enhancedSandboxCreateRequestSteps.includes('Verify that "New Purchase Request" form is visible on screen.') &&
+      enhancedSandboxCreateRequestSteps.includes('Enter "Test" in the "Project title" field.') &&
+      enhancedSandboxCreateRequestSteps.includes('Enter "IT services" in the "Please enter the business need" field.') &&
+      enhancedSandboxCreateRequestSteps.includes('Select "Jun 9, 2026" in the "Lead Time" date field.') &&
+      enhancedSandboxCreateRequestSteps.includes('Select "Express Delivery" from the "Select the delivery type" dropdown field.') &&
+      enhancedSandboxCreateRequestSteps.includes('Click the "Continue" button.') &&
+      enhancedSandboxCreateRequestSteps.indexOf('Click the "Continue" button.') === enhancedSandboxCreateRequestSteps.length - 1 &&
+      !enhancedSandboxCreateRequestSteps.some((step) => /Name of the project|According to this category|~ Continue|form or information/i.test(step)),
+  );
+
   const requestPurposeDraft = generateStepsFromScreenshotText(
     joinLines([
       "Procurement Intake Process",
@@ -5764,6 +5929,22 @@ function runSelfTests() {
       !enhancedRecommendedCategorySteps.some((step) => /Recommended options|432225|HW & MAINTENANCE|Read more|View all options|form or information/i.test(step)),
   );
 
+  const simpleRecommendedCategoryDraft = generateStepsFromScreenshotText(
+    joinLines(["Please select the best category for your request", "IT", "View all options", "Back Continue"]),
+  );
+  const enhancedSimpleRecommendedCategorySteps = simpleRecommendedCategoryDraft.steps.map((step, index) =>
+    localEnhanceStep(step, simpleRecommendedCategoryDraft.questions[index]),
+  );
+  assertCheck(
+    "simple category screen never treats footer buttons as category",
+    enhancedSimpleRecommendedCategorySteps.includes(
+      'Select "IT" from the "Please select the best category for your request" dropdown field.',
+    ) &&
+      enhancedSimpleRecommendedCategorySteps.includes('Click the "Continue" button.') &&
+      enhancedSimpleRecommendedCategorySteps.indexOf('Click the "Continue" button.') === enhancedSimpleRecommendedCategorySteps.length - 1 &&
+      !enhancedSimpleRecommendedCategorySteps.some((step) => /Back Continue|category "Continue"|View all options/i.test(step)),
+  );
+
   const marketingDetailsDraft = generateStepsFromScreenshotText(
     joinLines([
       "Type of marketing activity ?",
@@ -5825,6 +6006,54 @@ function runSelfTests() {
       enhancedBudgetFulfillmentSteps.includes('Select "Jun 3, 2026" in the "When do you need this request to be fulfilled?" date field.') &&
       enhancedBudgetFulfillmentSteps.includes('Click the "Continue" button.') &&
       !enhancedBudgetFulfillmentSteps.some((step) => /When do you need.*select|12,312.*visible/i.test(step)),
+  );
+
+  const sandboxPricingDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Requester Name",
+      "Oro Admin (aniket.dabhade@orolabs.ai)",
+      "customeradmin+los_pollos_hermanos_dev@orolabs.ai",
+      "Are you submitting the request on behalf of another User?",
+      "O Yes © No",
+      "Company Entity",
+      "Madrigal Electromotive",
+      "Department",
+      "Digital Marketing",
+      "Category",
+      "IT",
+      "Unit Price",
+      "Unit price of the product",
+      "$ 234.00",
+      "USD",
+      "Quantity",
+      "Quantity of the product",
+      "98",
+      "Total Amount",
+      "Total Amount = Unit Price * Quantity",
+      "$ 22,932.00",
+      "USD",
+      "Est. Purchase Amount is >= $10000. Budget Approval will be required.",
+      "Back Continue",
+    ]),
+  );
+  const enhancedSandboxPricingSteps = sandboxPricingDraft.steps.map((step, index) =>
+    localEnhanceStep(step, sandboxPricingDraft.questions[index]),
+  );
+  assertCheck(
+    "generic pricing screen pairs fields and ignores helper messages",
+    enhancedSandboxPricingSteps.includes(
+      'Verify that the "Requester Name" field is auto-populated with "Oro Admin (aniket.dabhade@orolabs.ai)".',
+    ) &&
+      enhancedSandboxPricingSteps.includes('For the question "Are you submitting the request on behalf of another User?", select "No".') &&
+      enhancedSandboxPricingSteps.includes('Select "Madrigal Electromotive" from the "Company Entity" dropdown field.') &&
+      enhancedSandboxPricingSteps.includes('Select "Digital Marketing" from the "Department" dropdown field.') &&
+      enhancedSandboxPricingSteps.includes('Select "IT" from the "Category" dropdown field.') &&
+      enhancedSandboxPricingSteps.includes('Enter "$ 234.00 USD" in the "Unit Price" field.') &&
+      enhancedSandboxPricingSteps.includes('Enter "98" in the "Quantity" field.') &&
+      enhancedSandboxPricingSteps.includes('Enter "$ 22,932.00 USD" in the "Total Amount" field.') &&
+      enhancedSandboxPricingSteps.includes('Click the "Continue" button.') &&
+      enhancedSandboxPricingSteps.indexOf('Click the "Continue" button.') === enhancedSandboxPricingSteps.length - 1 &&
+      !enhancedSandboxPricingSteps.some((step) => /Unit price of the product|Quantity of the product|Total Amount =|Budget Approval|customeradmin/i.test(step)),
   );
 
   const legalReviewOptionalDraft = generateStepsFromScreenshotText(
@@ -6666,6 +6895,89 @@ function runSelfTests() {
       enhancedSelectedSupplierSteps.includes('Click the "Select contact" button.') &&
       enhancedSelectedSupplierSteps.includes('Click the "Continue" button.') &&
       !enhancedSelectedSupplierSteps.some((step) => /_{3,}|Enabled for|United States \| ID|form or information|Select \"Enabled for/i.test(step)),
+  );
+
+  const selectedSupplierWarningDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Selected supplier",
+      "Maximum Pharma Test",
+      "23746, Mexico | Legal name: Maximum Pharma",
+      "Contact: Maximum + Primary",
+      "Existing supplier",
+      "Enabled for: Madrigal Electromotive (MAD_GLOBAL)",
+      "Selected supplier is already onboarded",
+      "Cancel request",
+      "Back Continue",
+    ]),
+  );
+  const enhancedSelectedSupplierWarningSteps = selectedSupplierWarningDraft.steps.map((step, index) =>
+    localEnhanceStep(step, selectedSupplierWarningDraft.questions[index]),
+  );
+  assertCheck(
+    "selected supplier warning card ignores cancel and onboarded noise",
+    enhancedSelectedSupplierWarningSteps.includes('Verify that "Maximum Pharma Test" is displayed in the "Selected supplier" section.') &&
+      enhancedSelectedSupplierWarningSteps.includes('Click the "Continue" button.') &&
+      !enhancedSelectedSupplierWarningSteps.some((step) => /Cancel request|already onboarded|Existing supplier|Enabled for|Legal name/i.test(step)),
+  );
+
+  const supplierRiskComplianceDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Supplier Document Status",
+      "This supplier does NOT have an active NDA in place. The supplier will be automatically asked for one.",
+      "Do you have a signed NDA to attach?",
+      "O Yes © No",
+      "This supplier does NOT have an active MSA in place.",
+      "Risk & Compliance Questions",
+      "Will this involve the usage of AI?",
+      "O Yes © No",
+      "Legal & Compliance: Does the supplier have any active or pending investigations with federal authorities (DEA, IRS, EPA)?",
+      "*Mandatory",
+      "© Yes O No",
+      "Data Security: Does the supplier have a documented 'Need-to-Know' policy that restricts order specifications and technical",
+      "formulas only to personnel with a verified security clearance?",
+      "*Mandatory",
+      "O Yes © No",
+      "Financial Stability: Can supplier guarantee 100% fulfillment of weekly volume requirements for the next 12 months without",
+      "variance in product quality or purity?",
+      "*Mandatory",
+      "© Yes O No",
+      "Logistics Compliance: Are all transport vehicles equipped with real-time, encrypted GPS tracking that can be integrated into",
+      "our central security monitoring dashboard?",
+      "*Mandatory",
+      "© Yes O No",
+      "Operational Risk: Will the vendor require physical access to any location or physical good owned by the company?",
+      "*Mandatory",
+      "O Yes © No",
+      "Risk Determined",
+      "This is a Low Risk engagement",
+      "Back Continue",
+    ]),
+  );
+  const enhancedSupplierRiskComplianceSteps = supplierRiskComplianceDraft.steps.map((step, index) =>
+    localEnhanceStep(step, supplierRiskComplianceDraft.questions[index]),
+  );
+  assertCheck(
+    "supplier risk compliance questions keep section-prefixed labels",
+    enhancedSupplierRiskComplianceSteps.includes('For the question "Do you have a signed NDA to attach?", select "No".') &&
+      enhancedSupplierRiskComplianceSteps.includes('For the question "Will this involve the usage of AI?", select "No".') &&
+      enhancedSupplierRiskComplianceSteps.includes(
+        'For the question "Legal & Compliance: Does the supplier have any active or pending investigations with federal authorities (DEA, IRS, EPA)?", select "Yes".',
+      ) &&
+      enhancedSupplierRiskComplianceSteps.includes(
+        'For the question "Data Security: Does the supplier have a documented \'Need-to-Know\' policy that restricts order specifications and technical formulas only to personnel with a verified security clearance?", select "No".',
+      ) &&
+      enhancedSupplierRiskComplianceSteps.includes(
+        'For the question "Financial Stability: Can supplier guarantee 100% fulfillment of weekly volume requirements for the next 12 months without variance in product quality or purity?", select "Yes".',
+      ) &&
+      enhancedSupplierRiskComplianceSteps.includes(
+        'For the question "Logistics Compliance: Are all transport vehicles equipped with real-time, encrypted GPS tracking that can be integrated into our central security monitoring dashboard?", select "Yes".',
+      ) &&
+      enhancedSupplierRiskComplianceSteps.includes(
+        'For the question "Operational Risk: Will the vendor require physical access to any location or physical good owned by the company?", select "No".',
+      ) &&
+      enhancedSupplierRiskComplianceSteps.includes('Click the "Continue" button.') &&
+      enhancedSupplierRiskComplianceSteps.indexOf('Click the "Continue" button.') === enhancedSupplierRiskComplianceSteps.length - 1 &&
+      !enhancedSupplierRiskComplianceSteps.some((step) => /Mandatory|does NOT have an active|Risk & Compliance Questions|Low Risk engagement|Supplier Document Status.*document/i.test(step)),
   );
 
   const selectedSupplierDetailsDraft = generateStepsFromScreenshotText(
