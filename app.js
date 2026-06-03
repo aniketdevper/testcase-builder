@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260602-anitech-flow-cleanup";
+const APP_VERSION = "20260603-screenshot-order-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -1800,13 +1800,20 @@ function getParsedItemRank(item, fallbackIndex) {
   return KNOWN_PARSED_ITEM_ORDER.has(key) ? KNOWN_PARSED_ITEM_ORDER.get(key) : 1000 + fallbackIndex;
 }
 
+function hasSortableKnownParsedContent(items) {
+  return (items || []).some((item) => {
+    const key = getParsedItemKey(item.step, item.question);
+    return KNOWN_PARSED_ITEM_ORDER.has(key) && key !== "button:continue";
+  });
+}
+
 function orderKnownDraftStepPairs(steps, questions) {
   const items = (steps || []).map((step, index) => ({
     step,
     question: (questions || [])[index] || "",
     order: index,
   }));
-  if (!items.some((item) => KNOWN_PARSED_ITEM_ORDER.has(getParsedItemKey(item.step, item.question)))) {
+  if (!hasSortableKnownParsedContent(items)) {
     return { steps, questions };
   }
 
@@ -1852,6 +1859,24 @@ function mergeParsedScreenshotSteps(primary, fallback) {
   const primaryItems = (primary.steps || []).map((step, index) => ({ step, question: (primary.questions || [])[index] || "" }));
   const fallbackItems = (fallback.steps || []).map((step, index) => ({ step, question: (fallback.questions || [])[index] || "" }));
   if (!fallbackItems.length) return primary;
+
+  const sortableItems = [...primaryItems, ...fallbackItems].filter((item) => !isEmptyOptionalParsedField(item));
+  if (!hasSortableKnownParsedContent(sortableItems)) {
+    const merged = [];
+    const seen = new Set();
+    [...primaryItems, ...fallbackItems].forEach((item) => {
+      if (isEmptyOptionalParsedField(item)) return;
+      const key = getParsedItemKey(item.step, item.question);
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(item);
+    });
+
+    return {
+      steps: merged.map((item) => item.step),
+      questions: merged.map((item) => item.question),
+    };
+  }
 
   const merged = [];
   const seen = new Set();
@@ -2475,6 +2500,16 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       pendingLabel = "";
       pendingOptions = false;
       return;
+    }
+
+    if (/^new supplier onboarding$/i.test(cleanLine)) {
+      const lastGenerated = generated[generated.length - 1] || {};
+      const followsOnboardingInfo = /^info\b/i.test(lastGenerated.step || "") && /new supplier onboarding/i.test(lastGenerated.step || "");
+      const followsSelectedOnboarding =
+        /^select\b/i.test(lastGenerated.step || "") &&
+        /new supplier onboarding/i.test(lastGenerated.step || "") &&
+        /type of supplier/i.test(lastGenerated.question || "");
+      if (!followsOnboardingInfo && !followsSelectedOnboarding) return;
     }
 
     if (isButtonLikeText(cleanLine)) {
@@ -5912,6 +5947,46 @@ function runSelfTests() {
     enhancedExistingSupplierTypeSteps.includes('For the question "Please select the type of supplier.", select "Existing Supplier".') &&
       enhancedExistingSupplierTypeSteps.includes('Click the "Continue" button.') &&
       !enhancedExistingSupplierTypeSteps.some((step) => /New Supplier Onboarding.*button|New Supplier Onboarding.*field/i.test(step)),
+  );
+
+  const existingSupplierBareOptionDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Please select the type of supplier.",
+      "© Existing supplier",
+      "New Supplier Onboarding",
+      "Back",
+      "Continue",
+    ]),
+  );
+  const enhancedExistingSupplierBareOptionSteps = existingSupplierBareOptionDraft.steps.map((step, index) =>
+    localEnhanceStep(step, existingSupplierBareOptionDraft.questions[index]),
+  );
+  assertCheck(
+    "supplier type bare unselected onboarding option is not treated as a button",
+    enhancedExistingSupplierBareOptionSteps.includes('For the question "Please select the type of supplier.", select "Existing Supplier".') &&
+      enhancedExistingSupplierBareOptionSteps.includes('Click the "Continue" button.') &&
+      enhancedExistingSupplierBareOptionSteps.indexOf('For the question "Please select the type of supplier.", select "Existing Supplier".') <
+        enhancedExistingSupplierBareOptionSteps.indexOf('Click the "Continue" button.') &&
+      !enhancedExistingSupplierBareOptionSteps.some((step) => /New Supplier Onboarding.*button|New Supplier Onboarding.*field/i.test(step)),
+  );
+
+  const mergedGenericSupplierTypeDraft = mergeParsedScreenshotSteps(
+    {
+      steps: ['select "Existing Supplier"', "button Continue"],
+      questions: ["Please select the type of supplier.", ""],
+    },
+    {
+      steps: ["button Continue"],
+      questions: [""],
+    },
+  );
+  const enhancedMergedGenericSupplierTypeSteps = mergedGenericSupplierTypeDraft.steps.map((step, index) =>
+    localEnhanceStep(step, mergedGenericSupplierTypeDraft.questions[index]),
+  );
+  assertCheck(
+    "fallback merge does not move continue before generic screenshot steps",
+    enhancedMergedGenericSupplierTypeSteps.join(" | ") ===
+      'For the question "Please select the type of supplier.", select "Existing Supplier". | Click the "Continue" button.',
   );
 
   const selectedSupplierDraft = generateStepsFromScreenshotText(
