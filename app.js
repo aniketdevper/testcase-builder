@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260602-selected-dashboard-tile";
+const APP_VERSION = "20260602-anitech-flow-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -1053,7 +1053,8 @@ function isBrowserChromeOcrLine(line) {
   if (/^cc?\s*\d*\s*https/i.test(lower)) return true;
   if (/\b(testcase builder|chatgpt|github dashboard|logout|oro sysadmin|procure@kyndryl|ask gemini)\b/i.test(text) && /\bxx?\b|@|®|©/i.test(text)) return true;
   if (/\b(botgauge|google sheets|vacation tracker|request form|sysadmin prod|sysadmin eu prod|sysadmin dev|gemini|chatgpt)\b/i.test(text)) return true;
-  if (/^home\s+tasks\s+requests\s+suppliers\s+more\b/i.test(text)) return true;
+  if (/\bhome\s+tasks\s+requests\s+suppliers\s+more\b/i.test(text)) return true;
+  if (/\bhome\b.*\btasks\b.*\brequests\b.*\bsuppliers\b.*\bmore\b/i.test(text) && text.split(/\s+/).length > 5) return true;
   if (/^(kyndryl|opella|sysadmin|gemini|chatgpt)\b/i.test(text) && text.split(/\s+/).length > 3) return true;
   return false;
 }
@@ -1380,6 +1381,13 @@ function normalizeChoiceOptionKey(value) {
     .trim();
 }
 
+function formatChoiceOptionLabel(value) {
+  const key = normalizeChoiceOptionKey(value);
+  if (key === "none of the above") return "None of the above";
+  if (key === "n/a" || key === "na" || key === "not applicable") return "Not Applicable";
+  return titleCase(value);
+}
+
 function cleanChoiceOptionValue(line) {
   const clean = cleanDynamicOptionLabel(line)
     .replace(/^[☐□]\s*/, "")
@@ -1387,9 +1395,9 @@ function cleanChoiceOptionValue(line) {
     .trim();
   const prefixMatch = clean.match(/^([^:：]{1,70})[:：]\s+(.+)$/);
   if (prefixMatch && CHOICE_OPTION_PREFIXES.has(normalizeChoiceOptionKey(prefixMatch[1]))) {
-    return titleCase(prefixMatch[1]);
+    return formatChoiceOptionLabel(prefixMatch[1]);
   }
-  if (CHOICE_OPTION_PREFIXES.has(normalizeChoiceOptionKey(clean))) return titleCase(clean);
+  if (CHOICE_OPTION_PREFIXES.has(normalizeChoiceOptionKey(clean))) return formatChoiceOptionLabel(clean);
   return clean;
 }
 
@@ -1403,6 +1411,12 @@ function isChoiceOptionDescriptionLine(line) {
 
 function isKnownChoiceOptionLine(value) {
   return isKnownChoiceOptionValue(value) || isKnownChoiceOptionValue(String(value || "").split(/[:：]/)[0]);
+}
+
+function isLeftoverChoiceOptionLine(line) {
+  const cleanLine = stripWrappingQuotes(normalizeOcrLine(line).replace(/[:*]+$/g, "").trim());
+  if (!cleanLine || hasChoiceSelectedOcrMarker(cleanLine)) return false;
+  return hasUnselectedOcrMarker(cleanLine) || isChoiceOptionDescriptionLine(cleanLine);
 }
 
 function isBareFieldBoundaryChoiceLine(line, options = {}) {
@@ -2000,12 +2014,14 @@ function getSummaryProcessStepNames(lines) {
 
   const names = [];
   for (let index = processIndex + 1; index < lines.length; index += 1) {
+    const originalLine = normalizeOcrLine(lines[index]);
     const cleanLine = cleanOcrDisplayValue(lines[index]);
     const cleanLabel = cleanOcrLabel(lines[index]);
     if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
     if (/show all process steps|(^|\s)(back|submit)($|\s)/i.test(cleanLabel) || isButtonLikeText(cleanLine)) break;
     if (/estimated duration/i.test(cleanLabel)) continue;
-    if (/\b\d+\s*[-–—]\s*\d+\s+days\b/i.test(cleanLine)) continue;
+    if (/\b\d+\s*[-–—]\s*\d+\s*days?\b/i.test(originalLine) || /^\d+\s*days?$/i.test(originalLine)) continue;
+    if (/\bassigned to\b|\best\.?\s*duration\b/i.test(cleanLine)) continue;
     if (/all steps will be executed/i.test(cleanLine)) continue;
     if (/^\d+$/.test(cleanLine)) continue;
 
@@ -2017,9 +2033,22 @@ function getSummaryProcessStepNames(lines) {
   return uniqueValues(names).slice(0, 4);
 }
 
+function getProcessDurationFromText(joinedText) {
+  const durationMatch = String(joinedText || "").match(
+    /\b(?:estimated duration to complete the process\s*)?(\d+\s*[-–—]\s*\d+\s*days?|\d+\s*days?)\b/i,
+  );
+  if (!durationMatch) return "";
+  return normalizeOcrLine(durationMatch[1])
+    .replace(/\s*[-–—]\s*/g, "-")
+    .replace(/(\d)\s*days?/i, "$1 days")
+    .trim();
+}
+
 function parseSubmissionSummaryPage(lines) {
+  const normalizedLines = (lines || []).map((line) => normalizeOcrLine(line)).filter(Boolean);
   const cleanLines = (lines || []).map((line) => cleanOcrDisplayValue(line)).filter(Boolean);
   const joinedText = cleanLines.join(" ");
+  const rawJoinedText = normalizedLines.join(" ");
   const hasSummarySignals =
     /request title/i.test(joinedText) &&
     /opportunity number/i.test(joinedText) &&
@@ -2046,9 +2075,8 @@ function parseSubmissionSummaryPage(lines) {
         getSummaryValueFromJoined(joinedText, "Opportunity Number", ["SLA timeframes", "Process details"]),
     );
 
-  const durationMatch = joinedText.match(/\b(?:estimated duration to complete the process\s*)?(\d+\s*[-–—]\s*\d+\s+days)\b/i);
-  const duration = durationMatch ? cleanSummaryFieldValue(durationMatch[1].replace(/\s*[-–—]\s*/g, "-")) : "";
-  const processStepNames = getSummaryProcessStepNames(cleanLines);
+  const duration = getProcessDurationFromText(rawJoinedText);
+  const processStepNames = getSummaryProcessStepNames(normalizedLines);
 
   const steps = ["Observe the final submission summary page."];
   const questions = [""];
@@ -2080,6 +2108,37 @@ function parseSubmissionSummaryPage(lines) {
   return { steps, questions };
 }
 
+function parseProcessDetailsPage(lines) {
+  const normalizedLines = (lines || []).map((line) => normalizeOcrLine(line)).filter(Boolean);
+  const cleanLines = (lines || []).map((line) => cleanOcrDisplayValue(line)).filter(Boolean);
+  const joinedText = cleanLines.join(" ");
+  const rawJoinedText = normalizedLines.join(" ");
+  const hasProcessDetailsSignals = /process details/i.test(joinedText) && /estimated duration/i.test(joinedText) && /\bsubmit\b/i.test(joinedText);
+  if (!hasProcessDetailsSignals || /request title/i.test(joinedText)) return { steps: [], questions: [] };
+
+  const duration = getProcessDurationFromText(rawJoinedText);
+  const processStepNames = getSummaryProcessStepNames(normalizedLines);
+  const steps = [];
+  const questions = [];
+
+  if (duration || processStepNames.length) {
+    const processParts = [
+      duration ? `estimated duration "${duration}"` : "",
+      processStepNames.length ? `process steps ${processStepNames.map((item) => `"${item}"`).join(" and ")}` : "",
+    ].filter(Boolean);
+    steps.push(`Verify that Process details displays ${processParts.join(" and ")}.`);
+    questions.push("");
+  } else {
+    steps.push("Observe the Process details page.");
+    questions.push("");
+  }
+
+  steps.push("button Submit");
+  questions.push("");
+
+  return { steps, questions };
+}
+
 function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   const rawLines = splitLines(text)
     .map((line) => normalizeOcrLine(line))
@@ -2094,6 +2153,8 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
   }
   const submissionSummaryDraft = parseSubmissionSummaryPage(rawLines);
   if (submissionSummaryDraft.steps.length) return submissionSummaryDraft;
+  const processDetailsDraft = parseProcessDetailsPage(rawLines);
+  if (processDetailsDraft.steps.length) return processDetailsDraft;
 
   const generated = [];
   let pendingLabel = "";
@@ -2168,6 +2229,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
     }
 
     if (!pendingLabel && isEmailLine(cleanLine)) return;
+    if (!pendingLabel && isLeftoverChoiceOptionLine(cleanLine)) return;
 
     if (/^\+?\s*add another supplier$/i.test(cleanLine)) return;
 
@@ -5657,6 +5719,35 @@ function runSelfTests() {
       !submissionSummaryRows.some((row) => /SecNet Program In|Show all process steps|Back Submit|SLA timeframes|responsible for delivering|form or information|Enter "Full Buying/.test(row.Steps)),
   );
 
+  const processDetailsDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Process details",
+      "Estimated duration to complete the process",
+      "7 days",
+      "1",
+      "Budget Review and Approvals",
+      "2",
+      "Procurement Review",
+      "Assigned to: Procurement | Est. Duration: 1 day",
+      "Show all process steps",
+      "Back",
+      "Submit",
+    ]),
+  );
+  const processDetailsRows = buildRowsForFormat(
+    [{ ...createStep(4), details: joinLines(processDetailsDraft.steps), questionLabel: joinLines(processDetailsDraft.questions) }],
+    "each-step",
+  );
+  assertCheck(
+    "process details screenshot creates concise submit review steps",
+    processDetailsRows.length === 2 &&
+      /estimated duration "7 days"/.test(processDetailsRows[0]?.Steps || "") &&
+      /Budget Review and Approvals/.test(processDetailsRows[0]?.Steps || "") &&
+      /Procurement Review/.test(processDetailsRows[0]?.Steps || "") &&
+      processDetailsRows[1]?.Steps === 'Click the "Submit" button.' &&
+      !processDetailsRows.some((row) => /Show all process steps|Assigned to|form or information|Verify that the days/i.test(row.Steps)),
+  );
+
   const blankScreenshotStep = createStep(1);
   const firstScreenshotStep = { ...createStep(1), id: "first-screenshot", details: "form verify visible on screen", questionLabel: "First screen" };
   const secondScreenshotStep = { ...createStep(2), id: "second-screenshot", details: "button Continue", questionLabel: "" };
@@ -5802,6 +5893,25 @@ function runSelfTests() {
       enhancedSupplierTypeSteps.includes('Click the "New Supplier Onboarding" button.') &&
       enhancedSupplierTypeSteps.includes('Click the "Continue" button.') &&
       !enhancedSupplierTypeSteps.some((step) => /Existing supplier.*field|form or information|^Verify that the proceed/i.test(step)),
+  );
+
+  const existingSupplierTypeDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Please select the type of supplier.",
+      "© Existing supplier",
+      "O New supplier onboarding",
+      "Back",
+      "Continue",
+    ]),
+  );
+  const enhancedExistingSupplierTypeSteps = existingSupplierTypeDraft.steps.map((step, index) =>
+    localEnhanceStep(step, existingSupplierTypeDraft.questions[index]),
+  );
+  assertCheck(
+    "supplier type selected existing does not click onboarding option",
+    enhancedExistingSupplierTypeSteps.includes('For the question "Please select the type of supplier.", select "Existing Supplier".') &&
+      enhancedExistingSupplierTypeSteps.includes('Click the "Continue" button.') &&
+      !enhancedExistingSupplierTypeSteps.some((step) => /New Supplier Onboarding.*button|New Supplier Onboarding.*field/i.test(step)),
   );
 
   const selectedSupplierDraft = generateStepsFromScreenshotText(
@@ -6012,6 +6122,30 @@ function runSelfTests() {
           step,
         ),
       ),
+  );
+
+  const riskReviewVisualCheckboxDifferentSelectionDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "What types of internal information will the vendor or their solution access, store, or process on behalf of the company?",
+      "Employee Data/ Personally Identifiable Information",
+      "Customer or client information",
+      "Payment or financial account data",
+      "Company confidential or proprietary information",
+      "Confidential business information",
+      "None of the above",
+      "Continue",
+    ]),
+    [{ optionCount: 6, selectedIndex: 1, selectedIndexes: [1, 5] }],
+  );
+  const enhancedDifferentCheckboxSteps = riskReviewVisualCheckboxDifferentSelectionDraft.steps.map((step, index) =>
+    localEnhanceStep(step, riskReviewVisualCheckboxDifferentSelectionDraft.questions[index]),
+  );
+  assertCheck(
+    "visual checkbox indexes map to selected OCR labels",
+    enhancedDifferentCheckboxSteps.includes(
+      'For the question "What types of internal information will the vendor or their solution access, store, or process on behalf of the company?", select "Customer or client information" and "None of the above".',
+    ) &&
+      !enhancedDifferentCheckboxSteps.some((step) => /Employee Data|Payment or financial|Company confidential|Confidential business/i.test(step)),
   );
 
   const riskReviewTextOnlyCheckboxDraft = generateStepsFromScreenshotText(
