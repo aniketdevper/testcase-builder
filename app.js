@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260603-cureka-parser-cleanup";
+const APP_VERSION = "20260603-footer-doc-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -801,6 +801,16 @@ function isButtonLikeText(line) {
   );
 }
 
+function getFooterActionButtonFromLine(line) {
+  const cleanLine = cleanOcrDisplayValue(line);
+  if (!cleanLine) return "";
+  if (/^new supplier onboarding$/i.test(cleanLine)) return "";
+  if (isButtonLikeText(cleanLine)) return /^submit task$/i.test(cleanLine) ? "Submit task" : titleCase(cleanLine);
+  if (/^(?:back\s+)?submit(?:\s+back)?$/i.test(cleanLine)) return "Submit";
+  if (/^(?:back\s+)?continue(?:\s+back)?$/i.test(cleanLine)) return "Continue";
+  return "";
+}
+
 function isLikelyStandaloneValue(line) {
   if (!line) return false;
   if (/^(yes|no)$/i.test(line)) return true;
@@ -867,6 +877,7 @@ function cleanDocumentDisplayValue(value) {
 
 function cleanAutoPopulatedFieldValue(value) {
   return cleanOcrDisplayValue(value)
+    .replace(/^[a-z]?[A-Z]{1,3}\s+(?=[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3}\s*\()/, "")
     .replace(/\s+\b(?:ww|w|x|v)\b\s*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -875,6 +886,7 @@ function cleanAutoPopulatedFieldValue(value) {
 function cleanOcrLabel(value) {
   return cleanOcrDisplayValue(value)
     .replace(/\s+\d+\s+(?:indicative budgetary quote|full buying process\s*\(purchase transaction\)|customer bid assistance)\s*$/i, "")
+    .replace(/\?\s*\d+\s*$/g, "?")
     .replace(/\s*\((?:optional|required)\)\s*/gi, " ")
     .replace(/\s+\(\s*\?\s*\)\s*$/g, "")
     .replace(/\s*[®©ⓘ]\s*$/g, "")
@@ -1256,6 +1268,15 @@ function isDocumentHelperTextLine(line) {
 
 function isDragDropOnlyHelperLine(line) {
   return /^drag\s+and\s+drop(?:\s+here)?$/i.test(cleanOcrDisplayValue(line));
+}
+
+function isDocumentFileValueLine(line) {
+  const cleanLine = cleanDocumentDisplayValue(line);
+  if (!cleanLine || getFooterActionButtonFromLine(cleanLine) || isStandaloneUploadDropzoneLine(cleanLine)) return false;
+  if (/^(upload additional documents?|additional docs|add supplier docs you already have|documents?|attachments?)$/i.test(cleanLine)) return false;
+  return /\b(sow|proposal|quote|quotation|doc|document|contract|agreement|certificate|proof|attachment|file|pdf|xls|xlsx|csv|png|jpg|jpeg)\b/i.test(
+    cleanLine,
+  );
 }
 
 function inferToggleSelectionFromLine(label, line) {
@@ -2453,14 +2474,22 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       }
     }
 
+    const footerActionButton = getFooterActionButtonFromLine(cleanLine);
+    if (footerActionButton) {
+      generated.push({ step: footerActionButton === "Submit task" ? "submit task" : `button ${footerActionButton}`, question: "" });
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
+    }
+
     if (pendingLabel && getScreenshotFieldType(pendingLabel) === "document" && !isButtonLikeText(cleanLine) && !isInformationalTextLine(cleanLine)) {
       const nextLineIsDropHelper = isDragDropOnlyHelperLine(nextLine) || /\bdrag and drop\b/i.test(cleanOcrDisplayValue(nextLine));
       const documentValue = cleanDocumentDisplayValue(cleanLine);
-      if (documentValue && nextLineIsDropHelper && !isStandaloneUploadDropzoneLine(cleanLine)) {
+      if (documentValue && (nextLineIsDropHelper || isDocumentFileValueLine(cleanLine)) && !isStandaloneUploadDropzoneLine(cleanLine)) {
         generated.push(createScreenshotStepForValue(pendingLabel, documentValue));
         pendingLabel = "";
         pendingOptions = false;
-        skipUntilLineIndex = lineIndex + 1;
+        if (nextLineIsDropHelper) skipUntilLineIndex = lineIndex + 1;
         return;
       }
     }
@@ -2754,10 +2783,7 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
         /new supplier onboarding/i.test(lastGenerated.step || "") &&
         /type of supplier/i.test(lastGenerated.question || "");
       if (!followsOnboardingInfo && !followsSelectedOnboarding) return;
-    }
-
-    if (isButtonLikeText(cleanLine)) {
-      generated.push({ step: cleanLine.toLowerCase() === "submit task" ? "submit task" : `button ${cleanLine}`, question: "" });
+      generated.push({ step: "button New Supplier Onboarding", question: "" });
       pendingLabel = "";
       pendingOptions = false;
       return;
@@ -4391,9 +4417,10 @@ function applyVisualActionFallbacks(parsed, hasVisualContinueButton, sourceText 
   const steps = [...(parsed.steps || [])];
   const questions = [...(parsed.questions || [])];
   const hasAnyActionButton = steps.some((step) => /\b(button|click)\b.*\b(continue|submit)\b|\b(continue|submit)\b.*\bbutton\b/i.test(step));
+  const isDashboardTileOnly = steps.length === 1 && /^tile\b/i.test(steps[0] || "");
   const actionLabel = /\bsubmit\b/i.test(sourceText) ? "Submit" : "Continue";
 
-  if (steps.length && hasVisualContinueButton && !hasAnyActionButton) {
+  if (steps.length && hasVisualContinueButton && !hasAnyActionButton && !isDashboardTileOnly) {
     steps.push(`button ${actionLabel}`);
     questions.push("");
   }
@@ -5219,6 +5246,12 @@ function runSelfTests() {
   assertCheck("dashboard tile wording", localEnhanceStep("tile Procurement Intake", "") === 'Click on the "Procurement Intake" tile from the dashboard.');
   assertCheck("tab navigation wording", localEnhanceStep("tab Request", "") === 'Go to the "Request" tab.');
   assertCheck("start task wording", localEnhanceStep("start task Procurement Review", "") === 'Click on "Start" for the "Procurement Review" task.');
+  assertCheck("auto-populated OCR prefix cleanup", cleanAutoPopulatedFieldValue("oA Oro Admin (aniket.dabhade@orolabs.ai)") === "Oro Admin (aniket.dabhade@orolabs.ai)");
+  assertCheck("question trailing OCR number cleanup", cleanOcrLabel("What's the purpose of this request? 3") === "What's the purpose of this request?");
+  assertCheck(
+    "dashboard tile visual fallback does not append continue",
+    applyVisualActionFallbacks({ steps: ["tile General Purchasing Intake Process"], questions: [""] }, true, "Start New Continue").steps.length === 1,
+  );
   assertCheck("infer selected yes from OCR radio markers", getSelectedOcrOption("Yes O No") === "Yes");
   assertCheck("infer selected no from OCR radio markers", getSelectedOcrOption("O Yes No") === "No");
   assertCheck(
@@ -5742,6 +5775,19 @@ function runSelfTests() {
       enhancedLegalReviewOptionalSteps.includes('For the "Additional docs", select the "Additional doc" document.') &&
       enhancedLegalReviewOptionalSteps.includes('Click the "Continue" button.') &&
       !enhancedLegalReviewOptionalSteps.some((step) => /This helps speed|Drag and drop|Optional|visible on screen/i.test(step)),
+  );
+
+  const legalReviewFooterDraft = generateStepsFromScreenshotText(
+    joinLines(["Additional docs (Optional)", "Additional doc", "Back Continue"]),
+  );
+  const enhancedLegalReviewFooterSteps = legalReviewFooterDraft.steps.map((step, index) =>
+    localEnhanceStep(step, legalReviewFooterDraft.questions[index]),
+  );
+  assertCheck(
+    "legal review footer buttons are not parsed as document values",
+    enhancedLegalReviewFooterSteps.includes('For the "Additional docs", select the "Additional doc" document.') &&
+      enhancedLegalReviewFooterSteps.includes('Click the "Continue" button.') &&
+      !enhancedLegalReviewFooterSteps.some((step) => /Back Continue|upload a valid document/i.test(step)),
   );
 
   const engagementDetailsDraft = generateStepsFromScreenshotText(
