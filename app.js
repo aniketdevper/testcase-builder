@@ -6,7 +6,7 @@ const USERS_STORAGE_KEY = "testcase-builder-users";
 const SESSION_STORAGE_KEY = "testcase-builder-session";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
-const APP_VERSION = "20260603-pepco-parser-cleanup";
+const APP_VERSION = "20260603-dashboard-status-cleanup";
 
 const DEFAULT_COLUMNS = [
   "Test Case ID",
@@ -232,6 +232,7 @@ function generateExpectedResult(stepText) {
   if (lower.includes("assignee")) return "The selected assignee should be applied successfully.";
   if (lower.includes("select") && lower.includes("dropdown field")) return "The selected dropdown value should be applied successfully.";
   if (lower.includes("dropdown")) return "The dropdown options should be available successfully.";
+  if (lower.includes("date field") || lower.includes("selected date")) return "The selected date should be applied successfully.";
   if (lower.includes("select") && (lower.includes(" and ") || lower.includes("multiple"))) return "The selected options should be applied successfully.";
   if (lower.includes("auto-populated")) return "The field should be auto-populated correctly.";
   if (lower.includes("toggle")) return "The toggle value should be updated successfully.";
@@ -288,6 +289,7 @@ function generateActualResult(expectedResult) {
     .replace(/^All entered or selected information should be/i, "All entered or selected information was")
     .replace(/^All steps in the form or page should be/i, "All steps in the form or page were")
     .replace(/^The selected options should be/i, "The selected options were")
+    .replace(/^The selected date should be/i, "The selected date was")
     .replace(/^The selected option should be/i, "The selected option was")
     .replace(/^The entered information should be/i, "The entered information was")
     .replace(/^The field value should be/i, "The field value was")
@@ -695,6 +697,7 @@ function normalizeDraftPairForPreview(step, question) {
   if (dateMatch) cleanStep = `date "${cleanDateDisplayValue(dateMatch[1])}"`;
   if (typeMatch && isAmountLikeFieldLabel(cleanQuestion)) cleanStep = `type "${cleanAmountDisplayValue(typeMatch[1])}"`;
   if (typeMatch && /opportunity number/i.test(cleanQuestion)) cleanStep = `type "${cleanOpportunityNumberValue(typeMatch[1])}"`;
+  cleanStep = cleanStep.replace(/"([^"]*?)\s+[~^˄˅⌃⌄]\s*"/g, (_, value) => `"${cleanProcessStepName(value)}"`);
 
   return { step: cleanStep, question: cleanQuestion };
 }
@@ -1111,7 +1114,48 @@ function isDashboardTileCandidate(line) {
 
   const words = cleanLine.split(/\s+/).filter(Boolean);
   if (words.length > 6) return false;
-  return words.some((word) => /^[A-Z0-9][A-Za-z0-9&/-]*$/.test(word));
+  return words.some((word) => /^[A-Z0-9][A-Za-z0-9&_/-]*$/.test(word));
+}
+
+function getDashboardDescriptionKey(value) {
+  return cleanDashboardTileCandidate(value)
+    .replace(/\s*\(\d+\)\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isShortDashboardTitlePrefix(value) {
+  const cleanLine = cleanDashboardTileCandidate(value);
+  if (!cleanLine || isLikelyDashboardTileDescription(cleanLine)) return false;
+  if (/\b(process|request|agent|onboarding|review|form|supplier|intake)\b/i.test(cleanLine)) return false;
+  return cleanLine.split(/\s+/).filter(Boolean).length <= 2;
+}
+
+function formatDashboardTitleFromPrefixAndDescription(prefix, description) {
+  const cleanPrefix = cleanDashboardTileCandidate(prefix);
+  const cleanDescription = getDashboardDescriptionKey(description);
+  if (!cleanPrefix || !cleanDescription) return "";
+  return `${cleanPrefix} ${cleanDescription}`.replace(/\s+/g, " ").trim();
+}
+
+function findRelatedDashboardTitle(tileCandidates, descriptionItem) {
+  if (!descriptionItem || !isLikelyDashboardTileDescription(descriptionItem.clean)) return null;
+  const descriptionKey = getDashboardDescriptionKey(descriptionItem.clean).toLowerCase();
+  if (!descriptionKey || descriptionKey.length < 6) return null;
+
+  const candidates = tileCandidates
+    .filter((item) => item !== descriptionItem && !isLikelyDashboardTileDescription(item.clean))
+    .map((item) => ({ item, distance: Math.abs(item.index - descriptionItem.index) }))
+    .sort((a, b) => a.distance - b.distance);
+
+  const matchingTitle = candidates.find(({ item }) => getDashboardDescriptionKey(item.clean).toLowerCase().endsWith(descriptionKey));
+  const prefixTitle = candidates.find(({ item }) => item.index < descriptionItem.index && isShortDashboardTitlePrefix(item.clean));
+  if (prefixTitle && (!matchingTitle || prefixTitle.distance <= matchingTitle.distance)) {
+    return { ...prefixTitle.item, clean: formatDashboardTitleFromPrefixAndDescription(prefixTitle.item.clean, descriptionItem.clean) };
+  }
+  if (matchingTitle) return matchingTitle.item;
+
+  return null;
 }
 
 function getDashboardTileLabel(lines) {
@@ -1132,11 +1176,17 @@ function getDashboardTileLabel(lines) {
 
   if (selectedTileIndex >= 0) {
     const selectedTile = tileCandidates[selectedTileIndex];
+    const relatedTitle = findRelatedDashboardTitle(tileCandidates, selectedTile);
+    if (relatedTitle?.clean) return relatedTitle.clean;
     const previousTitle = [...tileCandidates.slice(0, selectedTileIndex)]
       .reverse()
       .find((item) => !isLikelyDashboardTileDescription(item.clean));
     return isLikelyDashboardTileDescription(selectedTile.clean) && previousTitle ? previousTitle.clean : selectedTile.clean;
   }
+
+  const descriptionTile = tileCandidates.find((item) => isLikelyDashboardTileDescription(item.clean));
+  const relatedTitle = findRelatedDashboardTitle(tileCandidates, descriptionTile);
+  if (relatedTitle?.clean) return relatedTitle.clean;
 
   return tileCandidates.find((item) => !isLikelyDashboardTileDescription(item.clean))?.clean || tileCandidates[0]?.clean || "";
 }
@@ -1196,6 +1246,10 @@ function isSupplierCardLabel(line) {
   return /\bselected supplier\b/i.test(String(line || ""));
 }
 
+function isSupplierStatusLine(line) {
+  return /^status\s*:?\s*(?:new\s+supplier|existing\s+supplier|active|inactive|enabled|disabled)?$/i.test(cleanOcrDisplayValue(line));
+}
+
 function cleanSupplierCardName(line) {
   const clean = cleanOcrDisplayValue(
     String(line || "")
@@ -1209,7 +1263,7 @@ function cleanSupplierCardName(line) {
     .trim();
 
   if (!clean) return "";
-  if (/^(selected supplier|contact|enabled for:?|payment terms|status:?|add another supplier|back|continue)$/i.test(clean)) return "";
+  if (/^(selected supplier|contact|enabled for:?|payment terms|status:?|add another supplier|back|continue)$/i.test(clean) || isSupplierStatusLine(clean)) return "";
   if (parseSupplierDetailLine(clean) || /@/.test(clean) || /payment terms/i.test(clean)) return "";
   return clean;
 }
@@ -1252,7 +1306,7 @@ function parseSelectedSupplierCard(lines, startIndex) {
     if (!cleanLine || isLikelyOcrNoiseLine(cleanLine)) continue;
     if (/^(back|continue)$/i.test(cleanLine)) break;
     if (/^\+?\s*add another supplier$/i.test(cleanLine)) break;
-    if (/^status\b/i.test(cleanLine)) continue;
+    if (isSupplierStatusLine(cleanLine)) continue;
 
     endIndex = index;
 
@@ -2328,6 +2382,11 @@ function generateStepsFromScreenshotText(text, visualRadioGroups = []) {
       !hasUnselectedOcrMarker(cleanLine);
 
     if (isLikelyOcrNoiseLine(cleanLine) && !canUseNoisyPendingValue) return;
+    if (isSupplierStatusLine(cleanLine)) {
+      pendingLabel = "";
+      pendingOptions = false;
+      return;
+    }
 
     if (!pendingLabel && isTopLevelScreenTitleLine(cleanLine, lineIndex)) {
       generated.push({ step: "form verify visible on screen", question: cleanOcrLabel(cleanLine) });
@@ -5107,6 +5166,12 @@ function runSelfTests() {
     generateExpectedResult('For the question "What type of legal documentation is required for this engagement ?", select "Service Agreement".') ===
       "The selected option should be applied successfully.",
   );
+  assertCheck(
+    "date range selection uses date expected result",
+    generateExpectedResult('Select "Jun 3, 2026 to Jul 22, 2026" in the "Campaign start and end date" date field.') ===
+      "The selected date should be applied successfully." &&
+      generateActualResult("The selected date should be applied successfully.") === "The selected date was applied successfully.",
+  );
 
   const screenshotDraft = generateStepsFromScreenshotText(
     joinLines(["Which Country you belong to", "India", "Subject to Withholding tax?", "No", "Company name", "TechTest", "Continue"]),
@@ -5238,6 +5303,26 @@ function runSelfTests() {
     pepDashboardDraft.steps.length === 1 &&
       pepDashboardDraft.steps[0] === "tile PEP_Co Intake Process" &&
       localEnhanceStep(pepDashboardDraft.steps[0]) === 'Click on the "PEP_Co Intake Process" tile from the dashboard.',
+  );
+
+  const splitPepDashboardDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Home Tasks Requests Suppliers More",
+      "Start New",
+      "PEP_Co",
+      "Intake Process (1) v Tn",
+      "Start New",
+      "Supplier Onbording",
+      "Procurement Intake Process",
+      "compute form",
+      "My Requests",
+    ]),
+  );
+  assertCheck(
+    "generic dashboard parser joins split selected tile title",
+    splitPepDashboardDraft.steps.length === 1 &&
+      splitPepDashboardDraft.steps[0] === "tile PEP_Co Intake Process" &&
+      localEnhanceStep(splitPepDashboardDraft.steps[0]) === 'Click on the "PEP_Co Intake Process" tile from the dashboard.',
   );
 
   const visualRadioDraft = generateStepsFromScreenshotText(
@@ -6015,7 +6100,7 @@ function runSelfTests() {
 
   const mergedProcessDetailsDraft = mergeParsedScreenshotSteps(
     {
-      steps: ['Verify that Process details displays estimated duration "7 days" and process steps "Procurement Review" and "Department Review".', "button Submit"],
+      steps: ['Verify that Process details displays estimated duration "7 days" and process steps "Procurement Review" and "Department Review ~".', "button Submit"],
       questions: ["", ""],
     },
     {
@@ -6031,8 +6116,9 @@ function runSelfTests() {
     "process details fallback form row is not appended after stronger summary",
     mergedProcessDetailsRows.length === 2 &&
       /estimated duration "7 days"/.test(mergedProcessDetailsRows[0]?.Steps || "") &&
+      /Department Review"/.test(mergedProcessDetailsRows[0]?.Steps || "") &&
       mergedProcessDetailsRows[1]?.Steps === 'Click the "Submit" button.' &&
-      !mergedProcessDetailsRows.some((row) => /^Verify that "Process details" form/.test(row.Steps)),
+      !mergedProcessDetailsRows.some((row) => /Department Review ~|^Verify that "Process details" form/.test(row.Steps)),
   );
 
   const blankScreenshotStep = createStep(1);
@@ -6220,6 +6306,31 @@ function runSelfTests() {
       enhancedExistingSupplierBareOptionSteps.indexOf('For the question "Please select the type of supplier.", select "Existing Supplier".') <
         enhancedExistingSupplierBareOptionSteps.indexOf('Click the "Continue" button.') &&
       !enhancedExistingSupplierBareOptionSteps.some((step) => /New Supplier Onboarding.*button|New Supplier Onboarding.*field/i.test(step)),
+  );
+
+  const supplierStatusAfterTypeDraft = generateStepsFromScreenshotText(
+    joinLines([
+      "Select the type of Supplier ?",
+      "© Existing supplier",
+      "New supplier onboarding",
+      "Selected supplier",
+      "TIM S.p.A. Z=TIM",
+      "Milan, Italy | gruppotim.it",
+      "Select contact",
+      "Status: New Supplier",
+      "Continue",
+    ]),
+  );
+  const enhancedSupplierStatusAfterTypeSteps = supplierStatusAfterTypeDraft.steps.map((step, index) =>
+    localEnhanceStep(step, supplierStatusAfterTypeDraft.questions[index]),
+  );
+  assertCheck(
+    "supplier status metadata is not treated as supplier type field value",
+    enhancedSupplierStatusAfterTypeSteps.includes('For the question "Select the type of Supplier ?", select "Existing Supplier".') &&
+      enhancedSupplierStatusAfterTypeSteps.includes('Verify that "TIM S.p.A." is displayed in the "Selected supplier" section.') &&
+      enhancedSupplierStatusAfterTypeSteps.includes('Click the "Select contact" button.') &&
+      enhancedSupplierStatusAfterTypeSteps.includes('Click the "Continue" button.') &&
+      !enhancedSupplierStatusAfterTypeSteps.some((step) => /Enter "New Supplier"|Status: New Supplier|Z=TIM/i.test(step)),
   );
 
   const mergedGenericSupplierTypeDraft = mergeParsedScreenshotSteps(
